@@ -190,24 +190,56 @@ systemctl restart fail2ban >/dev/null 2>&1 || true
 
 log "Configuring UFW firewall..."
 
-# Allow new SSH port
+# --- SSH (custom port) ---
 ufw allow 2808/tcp >/dev/null 2>&1 || true
 ufw limit 2808/tcp >/dev/null 2>&1 || true
 
-# Remove default SSH rule if it exists (optional but clean)
+# Clean up default SSH rules on port 22 if present
 ufw delete allow 22/tcp >/dev/null 2>&1 || true
 ufw delete limit 22/tcp >/dev/null 2>&1 || true
 
-# Allow web traffic
-ufw allow 80/tcp >/dev/null 2>&1 || true
+# --- Core Web + Panel Ports ---
+
+# HTTP / HTTPS
+ufw allow 80/tcp  >/dev/null 2>&1 || true
 ufw allow 443/tcp >/dev/null 2>&1 || true
 
-# Default policies
-ufw default deny incoming >/dev/null 2>&1 || true
+# CyberPanel panel
+ufw allow 8090/tcp >/dev/null 2>&1 || true
+
+# OpenLiteSpeed WebAdmin
+ufw allow 7080/tcp >/dev/null 2>&1 || true
+
+# --- DNS (for nameserver / resolver if used) ---
+ufw allow 53/tcp  >/dev/null 2>&1 || true
+ufw allow 53/udp  >/dev/null 2>&1 || true
+
+# --- Mail Services ---
+
+# SMTP
+ufw allow 25/tcp   >/dev/null 2>&1 || true   # outbound often enough; inbound if you're receiving mail directly
+ufw allow 465/tcp  >/dev/null 2>&1 || true   # SMTPS
+ufw allow 587/tcp  >/dev/null 2>&1 || true   # Submission
+
+# POP3 / IMAP
+ufw allow 110/tcp  >/dev/null 2>&1 || true   # POP3
+ufw allow 995/tcp  >/dev/null 2>&1 || true   # POP3S
+ufw allow 143/tcp  >/dev/null 2>&1 || true   # IMAP
+ufw allow 993/tcp  >/dev/null 2>&1 || true   # IMAPS
+
+# --- FTP + Passive FTP ---
+
+ufw allow 21/tcp        >/dev/null 2>&1 || true           # FTP control
+ufw allow 40110:40210/tcp >/dev/null 2>&1 || true         # Passive FTP range (must match FTP config)
+
+# --- Default Policies ---
+
+ufw default deny incoming  >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
 
 log "Enabling firewall..."
 ufw --force enable >/dev/null 2>&1 || true
+
 
 
 # ----------------- ClamAV ----------------- #
