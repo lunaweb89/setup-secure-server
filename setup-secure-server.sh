@@ -150,7 +150,7 @@ AllowTcpForwarding yes
 AllowAgentForwarding yes
 
 LoginGraceTime 30
-MaxAuthTries 3
+MaxAuthTries 5
 ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
