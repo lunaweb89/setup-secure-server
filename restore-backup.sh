@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # restore-backup.sh – Safe Borg restore with auto-increment restore directory
+# and automatic cleanup of older restore folders.
 #
 
 set -euo pipefail
@@ -10,6 +11,7 @@ log() { echo "[+] $*"; }
 
 BORG_PASSFILE="/root/.borg-passphrase"
 REPO_FILE="/root/.borg-repository"
+KEEP_RESTORES=3   # how many restore folders per archive prefix to keep
 
 # -------------------------------------------------------------
 # Validation
@@ -79,11 +81,40 @@ read -rp "Base restore directory [/restore]: " BASE
 BASE="${BASE:-/restore}"
 BASE="${BASE%/}"
 
-TARGET="${BASE}/${ARCHIVE}"
+# -------------------------------------------------------------
+# Automatic cleanup of old restore folders
+# -------------------------------------------------------------
+
+ARCHIVE_PREFIX="$(basename "$ARCHIVE")"
+
+if [[ -d "$BASE" ]]; then
+  # Find dirs in BASE starting with ARCHIVE_PREFIX, sorted by mtime (newest first)
+  mapfile -t OLD_DIRS < <(
+    find "$BASE" -maxdepth 1 -mindepth 1 -type d -name "${ARCHIVE_PREFIX}*" -printf '%T@ %p\n' \
+      | sort -nr \
+      | awk '{ $1=""; sub(/^ /, ""); print }'
+  )
+
+  if (( ${#OLD_DIRS[@]} > KEEP_RESTORES )); then
+    TO_DELETE_COUNT=$(( ${#OLD_DIRS[@]} - KEEP_RESTORES ))
+    log "Found ${#OLD_DIRS[@]} existing restore dirs for prefix '${ARCHIVE_PREFIX}'."
+    log "Keeping newest ${KEEP_RESTORES}, deleting oldest ${TO_DELETE_COUNT}."
+
+    for ((i=KEEP_RESTORES; i<${#OLD_DIRS[@]}; i++)); do
+      DIR="${OLD_DIRS[i]}"
+      if [[ -d "$DIR" ]]; then
+        log "Deleting old restore dir: $DIR"
+        rm -rf -- "$DIR"
+      fi
+    done
+  fi
+fi
 
 # -------------------------------------------------------------
-# Auto-increment target directory if exists
+# Determine restore target (with auto-increment)
 # -------------------------------------------------------------
+
+TARGET="${BASE}/${ARCHIVE_PREFIX}"
 
 if [[ -e "$TARGET" ]]; then
   log "Target exists, choosing next available name..."
