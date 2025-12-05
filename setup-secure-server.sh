@@ -282,7 +282,6 @@ ufw allow 7080/tcp  >/dev/null || UFW_OK=0
 
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
-ufw allow out 53
 
 ufw allow 25/tcp    >/dev/null || UFW_OK=0
 ufw allow 465/tcp   >/dev/null || UFW_OK=0
