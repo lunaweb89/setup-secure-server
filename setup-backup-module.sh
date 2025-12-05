@@ -151,7 +151,7 @@ if ! "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 
   fi
 fi
 rm -f /tmp/borg-init.log || true
-unset BORG_PASSPHRASE
+# Do NOT unset BORG_PASSPHRASE here, we still need to print it later
 
 # -------------------------------------------------------------
 # CREATE DAILY BACKUP SCRIPT
