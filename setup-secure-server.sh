@@ -5,7 +5,7 @@
 # One-time full-security setup for fresh Ubuntu:
 #   - Repair dpkg/APT if broken
 #   - Install base packages
-#   - Enable kernel Livepatch (optional)
+#   - Enable kernel Livepatch via Ubuntu Pro (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
 #   - Harden SSH config (root login allowed, ports 22 + 2808)
@@ -17,8 +17,8 @@
 # Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
 
-set -u           # strict on unset vars
-set -o pipefail  # fail on pipeline errors
+set -u   # strict on unset vars
+set -o pipefail
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -66,9 +66,7 @@ get_codename() {
 apt_update_retry() {
   local tries=0 max_tries=3
   while (( tries < max_tries )); do
-    if apt-get update -qq; then
-      return 0
-    fi
+    if apt-get update -qq; then return 0; fi
     log "apt-get update failed (attempt $((tries+1))/$max_tries), retrying in 5s..."
     tries=$((tries + 1))
     sleep 5
@@ -77,12 +75,9 @@ apt_update_retry() {
 }
 
 apt_install_retry() {
-  local tries=0 max_tries=3
-  local pkgs=("$@")
+  local tries=0 max_tries=3 pkgs=("$@")
   while (( tries < max_tries )); do
-    if apt-get install -y -qq "${pkgs[@]}"; then
-      return 0
-    fi
+    if apt-get install -y -qq "${pkgs[@]}"; then return 0; fi
     log "apt-get install ${pkgs[*]} failed — running apt-get -f install..."
     apt-get -f install -y || true
     tries=$((tries + 1))
@@ -96,37 +91,51 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
-# ----------------- Prompt for Livepatch Token ----------------- #
+# ----------------- Ubuntu Pro / Livepatch (Optional) ----------------- #
 echo "============================================================"
-echo " Ubuntu Kernel Livepatch Setup (Optional)"
+echo " Ubuntu Pro Livepatch Setup (Optional)"
 echo "============================================================"
 echo "Livepatch applies kernel security updates WITHOUT rebooting."
-echo "Get a FREE token from: https://auth.livepatch.canonical.com/"
+echo "Requires an Ubuntu Pro token (not the old Livepatch token)."
+echo "Get one from: https://ubuntu.com/pro"
 echo
-read -r -p "Enter your Livepatch token (leave blank to skip): " LIVEPATCH_TOKEN
+read -r -p "Enter your Ubuntu Pro token (leave blank to skip Livepatch): " UBUNTU_PRO_TOKEN
 echo
 
-if [[ -n "$LIVEPATCH_TOKEN" ]]; then
-  log "Installing Canonical Livepatch..."
+if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
+  log "Setting up Ubuntu Pro + Livepatch..."
 
-  if ! command -v snap >/dev/null 2>&1; then
-    log "Snapd missing — installing..."
-    apt-get update -qq
-    apt-get install -y -qq snapd || {
-      log "ERROR: snapd install failed — cannot use Livepatch."
-      LIVEPATCH_TOKEN=""
-    }
+  # Ensure 'pro' CLI is available
+  if ! command -v pro >/dev/null 2>&1; then
+    log "ubuntu-advantage-tools (pro CLI) missing — installing..."
+    if ! apt_install_retry ubuntu-advantage-tools; then
+      log "ERROR: ubuntu-advantage-tools install failed — cannot enable Livepatch."
+      UBUNTU_PRO_TOKEN=""
+    fi
   fi
 
-  if [[ -n "$LIVEPATCH_TOKEN" ]]; then
-    snap install canonical-livepatch >/dev/null 2>&1 && \
-    canonical-livepatch enable "$LIVEPATCH_TOKEN" >/dev/null 2>&1
-
-    if canonical-livepatch status 2>/dev/null | grep -q "kernel"; then
-      log "Livepatch enabled successfully."
-      STEP_livepatch="OK"
+  if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
+    # Check if already attached
+    if pro status >/dev/null 2>&1; then
+      log "Ubuntu Pro already initialised; skipping 'pro attach'."
     else
-      log "WARNING: Livepatch activation failed."
+      log "Attaching this machine to Ubuntu Pro..."
+      if ! pro attach "$UBUNTU_PRO_TOKEN"; then
+        log "WARNING: 'pro attach' failed — Livepatch may not be available."
+      fi
+    fi
+
+    log "Enabling Livepatch via 'pro enable livepatch'..."
+    if pro enable livepatch >/dev/null 2>&1; then
+      if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
+        log "Livepatch enabled successfully via Ubuntu Pro."
+        STEP_livepatch="OK"
+      else
+        log "WARNING: Livepatch enable command ran, but status not confirmed as enabled."
+        STEP_livepatch="FAILED"
+      fi
+    else
+      log "WARNING: 'pro enable livepatch' failed."
       STEP_livepatch="FAILED"
     fi
   fi
@@ -155,7 +164,7 @@ fi
 
 # ----------------- SSH ensure service exists ----------------- #
 
-systemctl enable ssh  >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
+systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
 systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 CODENAME="$(get_codename)"
@@ -191,17 +200,16 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 EOF
 
-  # Weekly APT periodic security upgrades
   cat > "$AU" <<EOF
-APT::Periodic::Update-Package-Lists "7";
-APT::Periodic::Unattended-Upgrade "7";
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-  # Monthly explicit run on 1st at 10:30
+  # Monthly updates on 1st at 13:30 (cron in system time)
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 10 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
+30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
 EOF
 
   chmod 644 "$CRON_UPDATES"
@@ -285,11 +293,11 @@ ufw limit 2808/tcp  >/dev/null || true
 ufw allow 80/tcp    >/dev/null || UFW_OK=0
 ufw allow 443/tcp   >/dev/null || UFW_OK=0
 
-# App ports (CyberPanel / OLS WebAdmin)
+# App ports
 ufw allow 8090/tcp  >/dev/null || UFW_OK=0
 ufw allow 7080/tcp  >/dev/null || UFW_OK=0
 
-# DNS (inbound + outbound, TCP + UDP)
+# DNS
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
 ufw allow out 53/tcp >/dev/null || UFW_OK=0
@@ -308,10 +316,9 @@ ufw allow 993/tcp   >/dev/null || UFW_OK=0
 ufw allow 21/tcp          >/dev/null || UFW_OK=0
 ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
 
-# Livepatch + Snapd / HTTPS egress
+# Livepatch + Snapd traffic (HTTPS out)
 ufw allow out 443/tcp >/dev/null || UFW_OK=0
 
-# Default policies
 ufw default deny incoming  >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
 
@@ -343,27 +350,16 @@ MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
 MALDET_INST_OK=0
 
 if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
-  if tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"; then
-    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-    if [[ -n "$MALDET_SRC_DIR" ]]; then
-      if (cd "$MALDET_SRC_DIR" && bash install.sh); then
-        MALDET_INST_OK=1
-      else
-        log "ERROR: Maldet install.sh failed."
-      fi
-    else
-      log "ERROR: Could not locate Maldet source directory after extraction."
-    fi
-  else
-    log "ERROR: Failed to extract Maldet tarball."
+  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
+  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+  if [[ -n "$MALDET_SRC_DIR" ]]; then
+    (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
   fi
-else
-  log "ERROR: Failed to download Maldet from $MALDET_URL"
 fi
 
 if [[ -f /usr/local/maldetect/conf.maldet ]]; then
-  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet || true
-  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet || true
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
   STEP_maldet_install="OK"
 fi
 
@@ -376,7 +372,7 @@ log "Creating weekly malware scan cron job..."
 cat > "$CRON_MALWARE" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 11 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
+30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
 
 chmod 644 "$CRON_MALWARE"
@@ -418,17 +414,20 @@ echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
-# -------------------------------------------------------------
-# Run external backup module (GitHub-hosted)
-# -------------------------------------------------------------
-log "Running Backup + Storage Box module..."
 
-bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh)
-
-if [[ $? -eq 0 ]]; then
-  log "Backup module completed successfully."
+# -------------------------------------------------------------
+# Optional: Run external backup module (GitHub-hosted)
+# -------------------------------------------------------------
+read -r -p "Run Backup + Storage Box module now? [y/N]: " RUN_BACKUP
+if [[ "$RUN_BACKUP" =~ ^[Yy]$ ]]; then
+  log "Running Backup + Storage Box module..."
+  if bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh); then
+    log "Backup module completed successfully."
+  else
+    log "ERROR: Backup module failed. Check above logs."
+  fi
 else
-  log "ERROR: Backup module failed. Check above logs."
+  log "Skipping Backup + Storage Box module."
 fi
 
 exit 0
