@@ -156,7 +156,7 @@ Unattended-Upgrade::Origins-Pattern {
   "origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security";
 };
 Unattended-Upgrade::Automatic-Reboot "true";
-Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+Unattended-Upgrade::Automatic-Reboot-Time "09:00";
 Unattended-Upgrade::MailOnlyOnError "true";
 EOF
 
