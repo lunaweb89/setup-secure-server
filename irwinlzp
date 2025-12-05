@@ -18,6 +18,7 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
 
 set -u   # strict on unset vars
+set -o pipefail
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -178,7 +179,7 @@ Unattended-Upgrade::Origins-Pattern {
   "${ORIGIN_PATTERN}";
 };
 
-Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Automatic-Reboot-Time "14:00";
 Unattended-Upgrade::MailOnlyOnError "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
@@ -253,6 +254,7 @@ maxretry = 5
 [sshd]
 enabled  = true
 port     = 22,2808
+logpath  = %(sshd_log)s
 backend  = systemd
 EOF
 then
@@ -280,6 +282,7 @@ ufw allow 7080/tcp  >/dev/null || UFW_OK=0
 
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
+ufw allow out 53
 
 ufw allow 25/tcp    >/dev/null || UFW_OK=0
 ufw allow 465/tcp   >/dev/null || UFW_OK=0
@@ -364,7 +367,7 @@ fi
 if [[ -f /var/run/reboot-required ]]; then
   echo "--------------------------------------------------------"
   echo "[INFO] A system reboot is required."
-  echo "[INFO] It will automatically reboot at 14:00."
+  echo "[INFO] Automatic reboot is DISABLED — reboot manually when convenient."
   echo "--------------------------------------------------------"
 fi
 
@@ -392,7 +395,7 @@ echo
 # -------------------------------------------------------------
 log "Running Backup + Storage Box module..."
 
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/YOUR_REPO/main/setup-backup-module.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/server-backups/main/setup-backup-module.sh)
 
 if [[ $? -eq 0 ]]; then
   log "Backup module completed successfully."
