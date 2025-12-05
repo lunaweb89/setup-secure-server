@@ -2,18 +2,26 @@
 #
 # restore-backup.sh
 #
-# Helper to restore from Borg backups created by setup-backup-module.sh
-# Modes:
-#   1) Full restore (entire filesystem snapshot)
-#   2) WordPress + Email + MySQL + mail/LSWS configs for selected sites
+# Helper to restore from Borg backups on Hetzner Storage Box.
 #
-# Non-destructive: everything is restored under /restore/... by default.
+# Modes:
+#   1) Full restore (entire snapshot into /restore/...)
+#   2) WordPress + MySQL + mail/LSWS/CyberPanel configs for selected sites:
+#      - Auto-detect WP sites under home/<domain>/...
+#      - Restore into /restore/... via Borg
+#      - Automatically:
+#          * rsync WP to /home/<domain>/public_html
+#          * restore matching MySQL dump (var/backups/mysql/<DB_NAME>.sql)
+#          * rsync mail configs (postfix/dovecot/opendkim)
+#          * rsync LSWS + CyberPanel configs
+#          * restart services
 #
 
 set -euo pipefail
 
-log() { echo "[+] $*"; }
-err() { echo "[-] $*" >&2; }
+log()  { echo "[+] $*"; }
+err()  { echo "[-] $*" >&2; }
+info() { echo "[*] $*"; }
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -34,13 +42,14 @@ fi
 
 if [[ ! -f "$REPO_FILE" ]]; then
   err "Repository file not found at $REPO_FILE"
-  err "Expected repository URL to be stored there by setup-backup-module.sh"
   exit 1
 fi
 
-export BORG_PASSPHRASE="$(<"$BORG_PASSFILE")"
+export BORG_PASSPHRASE
+BORG_PASSPHRASE="$(<"$BORG_PASSFILE")"
+
 REPOSITORY="$(<"$REPO_FILE")"
-BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
+BORG_BIN="$(command -v borg || echo borg)"
 
 echo "============================================"
 echo " Borg Restore Helper"
@@ -49,15 +58,17 @@ echo "Repository: $REPOSITORY"
 echo
 
 # -------------------------------------------------------------
-# LIST ARCHIVES
+# SELECT ARCHIVE
 # -------------------------------------------------------------
 
 log "Fetching archive list..."
-mapfile -t ARCHIVES < <("$BORG_BIN" list "$REPOSITORY" --format '{archive}{NEWLINE}')
-if (( ${#ARCHIVES[@]} == 0 )); then
+ARCHIVES_RAW="$($BORG_BIN list "$REPOSITORY" --format '{archive}{NEWLINE}')"
+if [[ -z "$ARCHIVES_RAW" ]]; then
   err "No archives found in repository."
   exit 1
 fi
+
+IFS=$'\n' read -r -d '' -a ARCHIVES <<<"$(printf '%s\0' $ARCHIVES_RAW)"
 
 echo "Available archives:"
 for i in "${!ARCHIVES[@]}"; do
@@ -67,12 +78,12 @@ echo
 
 read -rp "Select archive number (or q to quit): " ARCH_SEL
 if [[ "$ARCH_SEL" == "q" || "$ARCH_SEL" == "Q" ]]; then
-  echo "[*] Aborted by user."
+  info "Aborted by user."
   exit 0
 fi
 
 if ! [[ "$ARCH_SEL" =~ ^[0-9]+$ ]] || (( ARCH_SEL < 1 || ARCH_SEL > ${#ARCHIVES[@]} )); then
-  err "Invalid archive selection."
+  err "Invalid selection."
   exit 1
 fi
 
@@ -81,7 +92,7 @@ log "Selected archive: $ARCHIVE"
 echo
 
 # -------------------------------------------------------------
-# RESTORE BASE DIRECTORY
+# BASE RESTORE DIRECTORY + UNIQUE TARGET
 # -------------------------------------------------------------
 
 read -rp "Base restore directory [/restore]: " BASE_DIR
@@ -89,100 +100,97 @@ BASE_DIR="${BASE_DIR:-/restore}"
 
 mkdir -p "$BASE_DIR"
 
-# Sanitize archive name into a folder-safe name
-ARCHIVE_SAFE="${ARCHIVE//:/-}"
-ARCHIVE_SAFE="${ARCHIVE_SAFE// /-}"
+# Normalised archive name for filesystem
+ARCH_SAFE="${ARCHIVE//:/-}"
+ARCH_SAFE="${ARCH_SAFE// /_}"
 
-TARGET="$BASE_DIR/$ARCHIVE_SAFE"
-
-# If target exists, append -1, -2, ...
-if [[ -e "$TARGET" ]]; then
-  suffix=1
-  while [[ -e "${TARGET}-${suffix}" ]]; do
-    ((suffix++))
-  done
-  TARGET="${TARGET}-${suffix}"
-fi
+TARGET="$BASE_DIR/$ARCH_SAFE"
+BASE_TARGET="$TARGET"
+suffix=1
+while [[ -e "$TARGET" ]]; do
+  TARGET="${BASE_TARGET}-${suffix}"
+  suffix=$((suffix+1))
+done
 
 log "Restore target: $TARGET"
 mkdir -p "$TARGET"
 
 # -------------------------------------------------------------
-# RESTORE MODE
+# RESTORE MODE SELECTION
 # -------------------------------------------------------------
 
 echo "Choose restore mode:"
 echo "  1) Full restore (entire snapshot; slower)"
-echo "  2) WordPress + Email + MySQL dumps + mail/LSWS configs for selected sites (faster)"
+echo "  2) WordPress + MySQL + mail/LSWS/CyberPanel configs for selected sites (faster, automatic)"
 read -rp "Enter 1 or 2 [2]: " MODE
 MODE="${MODE:-2}"
 
-# Helper: check if a path exists in archive path listing
-path_exists_in_archive() {
-  local p="$1"
-  local tmp_file="$2"
-  # Match directory or file prefix
-  grep -q "^${p}\(/.*\)\?$" "$tmp_file"
+# -------------------------------------------------------------
+# HELPER: MYSQL ROOT ACCESS
+# -------------------------------------------------------------
+
+build_mysql_cmd() {
+  local pw_file="/etc/cyberpanel/mysqlPassword"
+  if [[ -f "$pw_file" ]]; then
+    local pw
+    pw="$(<"$pw_file")"
+    echo "mysql -u root -p$pw"
+  else
+    # fallback: socket auth root
+    echo "mysql"
+  fi
 }
+
+MYSQL_CMD="$(build_mysql_cmd)"
 
 # -------------------------------------------------------------
 # MODE 1: FULL RESTORE
 # -------------------------------------------------------------
 
 if [[ "$MODE" == "1" ]]; then
-  echo
-  log "Mode 1 selected: full restore of entire snapshot."
-  echo "This will restore EVERYTHING from the archive into:"
-  echo "  $TARGET"
-  echo
-  read -rp "Proceed with full restore? [y/N]: " CONFIRM
-  CONFIRM="${CONFIRM:-N}"
-  if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    echo "[*] Aborted by user."
-    exit 0
-  fi
+  log "Mode 1 selected: full restore."
 
-  log "Starting full borg extract (this may take a while)..."
+  log "Starting full borg extract into: $TARGET"
+  echo "This may take a while depending on archive size."
   (
     cd "$TARGET"
-    # ARCHIVE must be first positional argument
-    "$BORG_BIN" extract --progress "$REPOSITORY::$ARCHIVE"
+    "$BORG_BIN" extract --list "$REPOSITORY::$ARCHIVE"
   )
-  log "Full restore completed successfully into $TARGET"
+
+  echo
+  log "Full restore completed into: $TARGET"
+  echo "You can now manually rsync from this directory into / as needed."
   exit 0
 fi
 
 # -------------------------------------------------------------
-# MODE 2: PARTIAL RESTORE FOR SELECTED SITES
+# MODE 2: WORDPRESS + MYSQL + CONFIGS (AUTOMATIC)
 # -------------------------------------------------------------
 
-echo
-log "Mode 2 selected: WordPress + email + MySQL dumps + mail/LSWS config for selected sites."
+log "Mode 2 selected: WordPress + MySQL + mail/LSWS/CyberPanel configs for selected sites."
+log "Listing archive paths for detection..."
 
 TMP_PATHS="$(mktemp)"
-trap 'rm -f "$TMP_PATHS"' EXIT
-
-log "Listing archive paths for detection..."
 if ! "$BORG_BIN" list "$REPOSITORY::$ARCHIVE" --format '{path}{NEWLINE}' > "$TMP_PATHS"; then
-  err "Failed to list archive contents for detection."
+  rm -f "$TMP_PATHS"
+  err "Failed to list archive contents."
   exit 1
 fi
 
 log "Scanning archive for WordPress sites (any wp-config.php under home/<domain>/...)..."
-mapfile -t WP_CONFIGS < <(
-  grep -E '^home/[^/]+/.*/wp-config\.php$' "$TMP_PATHS" || true
-)
+mapfile -t WP_CONFIGS < <(grep -E '^home/[^/]+/.*/wp-config\.php$' "$TMP_PATHS" || true)
 
 if (( ${#WP_CONFIGS[@]} == 0 )); then
+  rm -f "$TMP_PATHS"
   err "No WordPress installations (wp-config.php) found in this archive."
   exit 1
 fi
 
-DOMAINS=()
 declare -A SEEN
+DOMAINS=()
 
 for p in "${WP_CONFIGS[@]}"; do
-  # path pattern: home/<domain>/.../wp-config.php
+  # home/<domain>/.../wp-config.php
   domain="$(echo "$p" | cut -d'/' -f2)"
   if [[ -n "$domain" && -z "${SEEN[$domain]+x}" ]]; then
     SEEN["$domain"]=1
@@ -191,6 +199,7 @@ for p in "${WP_CONFIGS[@]}"; do
 done
 
 if (( ${#DOMAINS[@]} == 0 )); then
+  rm -f "$TMP_PATHS"
   err "No domains detected from wp-config.php paths."
   exit 1
 fi
@@ -207,28 +216,25 @@ SITE_SEL="${SITE_SEL:-all}"
 
 SELECTED_DOMAINS=()
 
-if [[ "$SITE_SEL" == "all" || "$SITE_SEL" == "ALL" ]]; then
+if [[ "$SITE_SEL" == "all" ]]; then
   SELECTED_DOMAINS=("${DOMAINS[@]}")
 else
-  IFS=',' read -r -a TOKENS <<< "$SITE_SEL"
-  for t in "${TOKENS[@]}"; do
-    t="$(echo "$t" | xargs)"  # trim
-    if ! [[ "$t" =~ ^[0-9]+$ ]]; then
-      err "Invalid selection token: $t"
+  IFS=',' read -r -a IDXES <<< "$SITE_SEL"
+  for idx in "${IDXES[@]}"; do
+    idx_trimmed="${idx//[[:space:]]/}"
+    if ! [[ "$idx_trimmed" =~ ^[0-9]+$ ]]; then
+      err "Invalid index: $idx_trimmed"
+      rm -f "$TMP_PATHS"
       exit 1
     fi
-    idx=$((t-1))
-    if (( idx < 0 || idx >= ${#DOMAINS[@]} )); then
-      err "Site index out of range: $t"
+    i_num=$((idx_trimmed-1))
+    if (( i_num < 0 || i_num >= ${#DOMAINS[@]} )); then
+      err "Index out of range: $idx_trimmed"
+      rm -f "$TMP_PATHS"
       exit 1
     fi
-    SELECTED_DOMAINS+=("${DOMAINS[idx]}")
+    SELECTED_DOMAINS+=("${DOMAINS[i_num]}")
   done
-fi
-
-if (( ${#SELECTED_DOMAINS[@]} == 0 )); then
-  err "No domains selected."
-  exit 1
 fi
 
 echo
@@ -236,35 +242,19 @@ log "You chose to restore these domains:"
 for d in "${SELECTED_DOMAINS[@]}"; do
   echo "  - $d"
 done
-echo
 
 # -------------------------------------------------------------
-# BUILD PATH LIST TO RESTORE (ONLY EXISTING PATHS)
+# BUILD PATH LIST FOR PARTIAL EXTRACT
 # -------------------------------------------------------------
 
-PATHS=()
+INCLUDE_PATHS=()
 
-# Per-site paths
 for domain in "${SELECTED_DOMAINS[@]}"; do
-  wp_dir="home/${domain}/public_html"
-  mail_dir="home/${domain}/mail"
-
-  if path_exists_in_archive "$wp_dir" "$TMP_PATHS"; then
-    log "Will restore WordPress files for $domain from $wp_dir"
-    PATHS+=("$wp_dir")
-  else
-    err "WordPress base directory not found in archive for $domain at $wp_dir"
-  fi
-
-  if path_exists_in_archive "$mail_dir" "$TMP_PATHS"; then
-    log "Will restore mailboxes for $domain from $mail_dir"
-    PATHS+=("$mail_dir")
-  else
-    log "No mail directory stored for $domain (skipping mail restore for this domain)."
-  fi
+  # WordPress + related stuff under home/<domain>
+  INCLUDE_PATHS+=("home/$domain")
 done
 
-# Global / shared paths (configs & MySQL dumps)
+# Global things we always restore (if present in archive)
 GLOBAL_PATHS=(
   "var/backups/mysql"
   "etc/postfix"
@@ -275,46 +265,166 @@ GLOBAL_PATHS=(
   "usr/local/CyberCP"
 )
 
-for g in "${GLOBAL_PATHS[@]}"; do
-  if path_exists_in_archive "$g" "$TMP_PATHS"; then
-    log "Will also restore: $g"
-    PATHS+=("$g")
-  else
-    log "Path not found in archive (skipping): $g"
+for gp in "${GLOBAL_PATHS[@]}"; do
+  if grep -qx "$gp" "$TMP_PATHS" || grep -q "^$gp/" "$TMP_PATHS"; then
+    INCLUDE_PATHS+=("$gp")
   fi
 done
 
-if (( ${#PATHS[@]} == 0 )); then
-  err "No matching paths found in archive for selected sites/configs."
-  exit 1
-fi
-
-# -------------------------------------------------------------
-# PARTIAL EXTRACT
-# -------------------------------------------------------------
+rm -f "$TMP_PATHS"
 
 echo
+log "Will extract the following paths from the archive:"
+for p in "${INCLUDE_PATHS[@]}"; do
+  echo "  - $p"
+done
+echo
+
 log "Starting partial borg extract into: $TARGET"
 echo "This may take a few minutes depending on archive size."
-echo
 
 (
   cd "$TARGET"
-  # ARCHIVE must be the first positional argument
-  "$BORG_BIN" extract --progress "$REPOSITORY::$ARCHIVE" "${PATHS[@]}"
+  "$BORG_BIN" extract --progress "$REPOSITORY::$ARCHIVE" "${INCLUDE_PATHS[@]}"
 )
 
-log "Partial restore completed successfully into $TARGET"
+log "Partial extract completed into $TARGET"
 echo
-echo "Contents include (for selected sites):"
-echo "  - home/<domain>/public_html   (WordPress files)"
-echo "  - home/<domain>/mail          (if existed in archive)"
-echo "  - var/backups/mysql/*.sql     (database dumps)"
-echo "  - etc/postfix, etc/dovecot, etc/opendkim"
-echo "  - etc/cyberpanel, usr/local/lsws, usr/local/CyberCP"
+
+# -------------------------------------------------------------
+# AUTOMATIC APPLY: FOR EACH SELECTED DOMAIN
+# -------------------------------------------------------------
+
+log "Applying restore automatically for selected domains..."
+
+for domain in "${SELECTED_DOMAINS[@]}"; do
+  echo
+  echo "============================================"
+  echo " Restoring domain: $domain"
+  echo "============================================"
+
+  RESTORED_HOME="$TARGET/home/$domain"
+  LIVE_HOME="/home/$domain"
+
+  if [[ ! -d "$RESTORED_HOME/public_html" ]]; then
+    err "No public_html found for $domain in $RESTORED_HOME. Skipping this domain."
+    continue
+  fi
+
+  mkdir -p "$LIVE_HOME/public_html"
+
+  # 1) Rsync WordPress files
+  log "Rsyncing WordPress files to $LIVE_HOME/public_html ..."
+  rsync -aHAX --delete "$RESTORED_HOME/public_html/" "$LIVE_HOME/public_html/"
+
+  # 2) Database restore (auto from wp-config.php)
+  WP_CONFIG="$RESTORED_HOME/public_html/wp-config.php"
+  if [[ ! -f "$WP_CONFIG" ]]; then
+    err "wp-config.php not found for $domain at $WP_CONFIG; skipping DB restore for this domain."
+    continue
+  fi
+
+  log "Parsing DB credentials from $WP_CONFIG ..."
+
+  DB_NAME="$(grep -E "DB_NAME" "$WP_CONFIG" | head -n1 | sed "s/.*DB_NAME', *'\(.*\)'.*/\1/")" || DB_NAME=""
+  DB_USER="$(grep -E "DB_USER" "$WP_CONFIG" | head -n1 | sed "s/.*DB_USER', *'\(.*\)'.*/\1/")" || DB_USER=""
+  DB_PASS="$(grep -E "DB_PASSWORD" "$WP_CONFIG" | head -n1 | sed "s/.*DB_PASSWORD', *'\(.*\)'.*/\1/")" || DB_PASS=""
+
+  if [[ -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASS" ]]; then
+    err "Failed to parse DB credentials from wp-config.php for $domain; skipping DB restore."
+    continue
+  fi
+
+  log "DB_NAME = $DB_NAME"
+  log "DB_USER = $DB_USER"
+  # Not logging DB_PASS for security
+
+  DUMPFILE="$TARGET/var/backups/mysql/$DB_NAME.sql"
+  if [[ ! -f "$DUMPFILE" ]]; then
+    err "MySQL dump $DUMPFILE not found; skipping DB import for $domain."
+    continue
+  fi
+
+  log "Ensuring database & user exist for $DB_NAME ..."
+
+  $MYSQL_CMD <<EOF || err "Warning: could not create DB/user for $DB_NAME (continuing)."
+CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+
+  log "Importing dump $DUMPFILE into $DB_NAME ..."
+  $MYSQL_CMD "$DB_NAME" < "$DUMPFILE" || err "MySQL import failed for $DB_NAME (check manually)."
+
+  log "Domain $domain: WordPress files + DB restored."
+done
+
+# -------------------------------------------------------------
+# APPLY GLOBAL CONFIGS (MAIL, LSWS, CYBERPANEL)
+# -------------------------------------------------------------
+
 echo
-echo "Next steps (on a rebuilt server) typically are:"
-echo "  - rsync public_html into /home/<domain>/public_html"
-echo "  - import the correct MySQL dump into a new DB"
-echo "  - rsync mail/ if you want to restore mailboxes"
-echo "  - compare/merge configs from etc/ and usr/local/lsws"
+log "Applying global configs (if present in restore tree)..."
+
+if [[ -d "$TARGET/etc/postfix" ]]; then
+  log "Rsyncing /etc/postfix ..."
+  rsync -aHAX "$TARGET/etc/postfix/" /etc/postfix/
+fi
+
+if [[ -d "$TARGET/etc/dovecot" ]]; then
+  log "Rsyncing /etc/dovecot ..."
+  rsync -aHAX "$TARGET/etc/dovecot/" /etc/dovecot/
+fi
+
+if [[ -d "$TARGET/etc/opendkim" ]]; then
+  log "Rsyncing /etc/opendkim ..."
+  rsync -aHAX "$TARGET/etc/opendkim/" /etc/opendkim/
+fi
+
+if [[ -d "$TARGET/etc/cyberpanel" ]]; then
+  log "Rsyncing /etc/cyberpanel ..."
+  rsync -aHAX "$TARGET/etc/cyberpanel/" /etc/cyberpanel/
+fi
+
+if [[ -d "$TARGET/usr/local/lsws" ]]; then
+  log "Rsyncing /usr/local/lsws ..."
+  rsync -aHAX "$TARGET/usr/local/lsws/" /usr/local/lsws/
+fi
+
+if [[ -d "$TARGET/usr/local/CyberCP" ]]; then
+  log "Rsyncing /usr/local/CyberCP ..."
+  rsync -aHAX "$TARGET/usr/local/CyberCP/" /usr/local/CyberCP/
+fi
+
+# -------------------------------------------------------------
+# RESTART SERVICES
+# -------------------------------------------------------------
+
+echo
+log "Restarting services (Postfix, Dovecot, LSWS, CyberPanel)..."
+
+systemctl restart postfix  || err "Failed to restart postfix (check manually)."
+systemctl restart dovecot  || err "Failed to restart dovecot (check manually)."
+systemctl restart lsws     || err "Failed to restart lsws (check manually)."
+systemctl restart lscpd    || err "Failed to restart lscpd (check manually)."
+
+echo
+log "Automatic restore completed."
+
+echo
+echo "Summary:"
+echo "  - Selected archive: $ARCHIVE"
+echo "  - Restore target:   $TARGET"
+echo "  - Domains restored: ${SELECTED_DOMAINS[*]}"
+echo
+echo "Each selected domain had:"
+echo "  - WordPress files rsynced to /home/<domain>/public_html"
+echo "  - Matching DB imported from var/backups/mysql/<DB_NAME>.sql"
+echo "  - Mail + LSWS + CyberPanel configs rsynced (if present)"
+echo
+echo "If anything looks off, you can still inspect: $TARGET"
+echo "and manually adjust or re-rsync specific paths."
+echo
+
+exit 0
