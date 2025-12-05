@@ -25,7 +25,7 @@ require_root
 export DEBIAN_FRONTEND=noninteractive
 
 # -------------------------------------------------------------
-# PROMPT FOR STORAGE BOX DETAILS (HOSTNAME FIRST)
+# PROMPT FOR STORAGE BOX DETAILS
 # -------------------------------------------------------------
 
 echo "===== Hetzner Storage Box Backup Setup (Borg) ====="
@@ -35,15 +35,16 @@ read -rp "Storage Box SSH port (default 23): " BOXPORT
 BOXPORT="${BOXPORT:-23}"
 
 DEFAULT_REPO_DIR="server-$(hostname)"
-read -rp "Repository directory under /backups/ [${DEFAULT_REPO_DIR}]: " REPO_DIR
+read -rp "Repository directory under /backup/ [${DEFAULT_REPO_DIR}]: " REPO_DIR
 REPO_DIR="${REPO_DIR:-$DEFAULT_REPO_DIR}"
 
 if [[ -z "${BOXUSER}" || -z "${BOXHOST}" ]]; then
-  err "Storage Box username and hostname are required."
+  err "Storage Box username and server are required."
   exit 1
 fi
 
-REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backups/${REPO_DIR}"
+# Note: Hetzner docs use /backup, not /backups
+REPOSITORY="ssh://${BOXUSER}@${BOXHOST}:${BOXPORT}/./backup/${REPO_DIR}"
 log "Borg repository will be: ${REPOSITORY}"
 
 BORG_PASSFILE="/root/.borg-passphrase"
@@ -86,7 +87,7 @@ apt-get install -y -qq borgbackup
 BORG_BIN="$(command -v borg || echo /usr/bin/borg)"
 
 # -------------------------------------------------------------
-# SSH KEY SETUP (HETZNER REQUIRES -s)
+# SSH KEY SETUP (HETZNER: USE -s, BUT ONLY IF NEEDED)
 # -------------------------------------------------------------
 
 if [[ ! -f /root/.ssh/id_rsa ]]; then
@@ -98,8 +99,13 @@ else
   log "Existing SSH key found at /root/.ssh/id_rsa, reusing."
 fi
 
-log "Copying SSH key to Storage Box (Hetzner requires -s)..."
-ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
+# Test if key already works (no password)
+if ssh -p "${BOXPORT}" -o BatchMode=yes -o ConnectTimeout=5 "${BOXUSER}@${BOXHOST}" true 2>/dev/null; then
+  log "SSH key already works on Storage Box, skipping ssh-copy-id."
+else
+  log "Copying SSH key to Storage Box (Hetzner requires -s)..."
+  ssh-copy-id -s -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
+fi
 
 # -------------------------------------------------------------
 # STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
@@ -130,13 +136,13 @@ rm -f "$TESTFILE_LOCAL" || true
 log "Storage Box connectivity OK."
 
 # -------------------------------------------------------------
-# INIT BORG REPO (IDEMPOTENT)
+# INIT BORG REPO (IDEMPOTENT, CREATE PARENT DIRS)
 # -------------------------------------------------------------
 
 log "Initializing (or verifying) Borg repository on Storage Box..."
 
 export BORG_PASSPHRASE
-if ! "${BORG_BIN}" init --encryption=repokey "${REPOSITORY}" 2>/tmp/borg-init.log; then
+if ! "${BORG_BIN}" init --encryption=repokey --make-parent-dirs "${REPOSITORY}" 2>/tmp/borg-init.log; then
   if grep -qi "already exists" /tmp/borg-init.log 2>/dev/null; then
     log "Borg repository already exists, continuing."
   else
@@ -238,32 +244,10 @@ EOF
 chmod 644 "$CRON_BACKUP"
 
 # -------------------------------------------------------------
-# TEST REMOTE ACCESS (OPTIONAL CHECK)
-# -------------------------------------------------------------
-
-log "Testing Storage Box Borg availability..."
-
-if ssh -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}" "borg --version" >/dev/null 2>&1; then
-  log "Remote test OK (borg --version)."
-else
-  err "Remote Borg test FAILED — ensure Borg is enabled for your Storage Box."
-fi
-
-# -------------------------------------------------------------
 # COMPLETION & PASSPHRASE DISPLAY
 # -------------------------------------------------------------
 
 echo
 log "Backup module installation finished successfully."
 
-echo "------------------------------------------------------------"
-echo " IMPORTANT: SAVE YOUR BORG PASSPHRASE"
-echo "------------------------------------------------------------"
-echo "${BORG_PASSPHRASE}"
-echo "------------------------------------------------------------"
-echo "The passphrase is stored locally at: /root/.borg-passphrase"
-echo "The repository URL is stored at:    /root/.borg-repository"
-echo "You must save the above passphrase somewhere safe."
-echo
-
-exit 0
+echo "--------------------------------------
