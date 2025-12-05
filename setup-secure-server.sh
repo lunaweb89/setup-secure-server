@@ -97,7 +97,7 @@ echo " Ubuntu Pro Livepatch Setup (Optional)"
 echo "============================================================"
 echo "Livepatch applies kernel security updates WITHOUT rebooting."
 echo "Requires an Ubuntu Pro token (not the old Livepatch token)."
-echo "Get one from: https://ubuntu.com/pro"
+echo "Get one from: https://ubuntu.com/pro/subscribe"
 echo
 read -r -p "Enter your Ubuntu Pro token (leave blank to skip Livepatch): " UBUNTU_PRO_TOKEN
 echo
