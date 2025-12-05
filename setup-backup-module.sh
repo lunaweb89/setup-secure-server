@@ -104,7 +104,7 @@ else
 fi
 
 log "Copying SSH key to Storage Box (may prompt for password)..."
-ssh-copy-id -p "${BOXPORT}" "${BOXUSER}@${BOXHOST}"
+ssh-copy-id -p "${BOXPORT}" -s "${BOXUSER}@${BOXHOST}"
 
 # -------------------------------------------------------------
 # STORAGE BOX CONNECTION TEST - UPLOAD TEMP FILE
