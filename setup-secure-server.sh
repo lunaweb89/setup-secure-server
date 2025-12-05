@@ -4,14 +4,15 @@
 #
 # One-time full-security setup for fresh Ubuntu:
 #   - Repair dpkg/APT if broken
-#   - Install required base packages
+#   - Install base packages
+#   - Enable kernel Livepatch (optional)
 #   - Enable security-only automatic updates
 #   - Configure monthly cron job for updates
-#   - Harden SSH configuration (root login allowed, ports 22 + 2808)
-#   - Install + configure Fail2Ban (maxretry=5)
-#   - Configure + enable UFW firewall (SSH, web, CyberPanel, mail, FTP, DNS)
-#   - Install ClamAV + Maldet (Linux Malware Detect)
-#   - Run weekly malware scans via cron on /home
+#   - Harden SSH config (root login allowed, ports 22 + 2808)
+#   - Install & configure Fail2Ban
+#   - Configure & enable UFW firewall
+#   - Install ClamAV + Maldet
+#   - Create weekly malware scan cron job
 #
 # Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-secure-server.sh)
@@ -20,6 +21,7 @@ set -u   # strict on unset vars
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
+STEP_livepatch="SKIPPED"
 STEP_auto_security_updates="FAILED"
 STEP_ssh_hardening="FAILED"
 STEP_fail2ban_config="FAILED"
@@ -55,7 +57,6 @@ get_codename() {
   if command -v lsb_release >/dev/null 2>&1; then
     lsb_release -sc
   else
-    # shellcheck disable=SC1091
     . /etc/os-release
     echo "${VERSION_CODENAME:-}"
   fi
@@ -64,24 +65,19 @@ get_codename() {
 apt_update_retry() {
   local tries=0 max_tries=3
   while (( tries < max_tries )); do
-    if apt-get update -qq; then
-      return 0
-    fi
+    if apt-get update -qq; then return 0; fi
+    log "apt-get update failed (attempt $((tries+1))/$max_tries), retrying in 5s..."
     tries=$((tries + 1))
-    log "apt-get update failed (attempt $tries/$max_tries), retrying in 5s..."
     sleep 5
   done
   return 1
 }
 
 apt_install_retry() {
-  local tries=0 max_tries=3
-  local pkgs=("$@")
+  local tries=0 max_tries=3 pkgs=("$@")
   while (( tries < max_tries )); do
-    if apt-get install -y -qq "${pkgs[@]}"; then
-      return 0
-    fi
-    log "apt-get install ${pkgs[*]} failed, retrying..."
+    if apt-get install -y -qq "${pkgs[@]}"; then return 0; fi
+    log "apt-get install ${pkgs[*]} failed — running apt-get -f install..."
     apt-get -f install -y || true
     tries=$((tries + 1))
     sleep 5
@@ -94,27 +90,67 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
+# ----------------- Prompt for Livepatch Token ----------------- #
+echo "============================================================"
+echo " Ubuntu Kernel Livepatch Setup (Optional)"
+echo "============================================================"
+echo "Livepatch applies kernel security updates WITHOUT rebooting."
+echo "Get a FREE token from: https://auth.livepatch.canonical.com/"
+echo
+read -r -p "Enter your Livepatch token (leave blank to skip): " LIVEPATCH_TOKEN
+echo
+
+if [[ -n "$LIVEPATCH_TOKEN" ]]; then
+  log "Installing Canonical Livepatch..."
+
+  if ! command -v snap >/dev/null 2>&1; then
+    log "Snapd missing — installing..."
+    apt-get update -qq
+    apt-get install -y -qq snapd || {
+      log "ERROR: snapd install failed — cannot use Livepatch."
+      LIVEPATCH_TOKEN=""
+    }
+  fi
+
+  if [[ -n "$LIVEPATCH_TOKEN" ]]; then
+    snap install canonical-livepatch >/dev/null 2>&1 && \
+    canonical-livepatch enable "$LIVEPATCH_TOKEN" >/dev/null 2>&1
+
+    if canonical-livepatch status 2>/dev/null | grep -q "kernel"; then
+      log "Livepatch enabled successfully."
+      STEP_livepatch="OK"
+    else
+      log "WARNING: Livepatch activation failed."
+      STEP_livepatch="FAILED"
+    fi
+  fi
+else
+  log "Livepatch skipped."
+fi
+
 # ----------------- Repair dpkg / APT ----------------- #
+
 log "Checking dpkg / APT health..."
 
 if dpkg --audit | grep -q .; then
   log "dpkg broken — repairing..."
-  dpkg --configure -a || log "WARNING: dpkg configure did not fully succeed."
+  dpkg --configure -a || log "WARNING: dpkg configure did not finish cleanly."
 fi
 
 apt-get -f install -y || true
 
-log "Running apt-get update with retry..."
-apt_update_retry || log "ERROR: apt-get update failed after retries."
+log "Running apt-get update..."
+apt_update_retry || log "ERROR: apt-get update failed."
 
 log "Installing required base packages..."
 if apt_install_retry lsb-release ca-certificates openssh-server cron ufw fail2ban unattended-upgrades curl wget tar; then
   STEP_update_base_packages="OK"
 fi
 
-log "Ensuring SSH service is running..."
+# ----------------- SSH ensure service exists ----------------- #
+
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
-systemctl restart ssh  >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
+systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 CODENAME="$(get_codename)"
 log "Ubuntu codename detected: ${CODENAME:-unknown}"
@@ -128,10 +164,9 @@ CRON_UPDATES="/etc/cron.d/auto-security-updates"
 backup "$UU"
 backup "$AU"
 
-log "Configuring unattended security-only upgrades..."
+log "Configuring unattended security upgrades..."
 
 {
-  # NEW: fallback if CODENAME is empty
   if [[ -n "$CODENAME" ]]; then
     ORIGIN_PATTERN="origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security"
   else
@@ -146,33 +181,25 @@ Unattended-Upgrade::Origins-Pattern {
 Unattended-Upgrade::Automatic-Reboot "true";
 Unattended-Upgrade::Automatic-Reboot-Time "14:00";
 Unattended-Upgrade::MailOnlyOnError "true";
-
-# NEW Quality-of-life improvements
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 EOF
 
-  # Periodic (still required even when using cron)
-  cat > "$AU" <<'EOF'
+  cat > "$AU" <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-  # UPDATED: monthly updates (1st of month at 13:30)
+  # Monthly updates on 1st at 13:30
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-# Run unattended-upgrade monthly on the 1st at 13:30
 30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
 EOF
 
   chmod 644 "$CRON_UPDATES"
   STEP_auto_security_updates="OK"
-
-} || {
-  log "ERROR: Failed to configure unattended upgrades."
-}
+} || log "ERROR: Failed to configure unattended-upgrades."
 
 # ----------------- SSH Hardening ----------------- #
 
@@ -187,17 +214,14 @@ if cat > "$SSH_HARDEN" <<'EOF'
 Port 22
 Port 2808
 Protocol 2
-
 PermitRootLogin yes
 PasswordAuthentication yes
 ChallengeResponseAuthentication no
 PermitEmptyPasswords no
 UsePAM yes
-
 X11Forwarding no
 AllowTcpForwarding yes
 AllowAgentForwarding yes
-
 LoginGraceTime 30
 MaxAuthTries 5
 ClientAliveInterval 300
@@ -208,7 +232,7 @@ then
     systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1
     STEP_ssh_hardening="OK"
   else
-    echo "[-] SSH config test failed; NOT reloading."
+    log "ERROR: SSH config test failed."
   fi
 fi
 
@@ -250,8 +274,10 @@ ufw limit 2808/tcp  >/dev/null || true
 
 ufw allow 80/tcp    >/dev/null || UFW_OK=0
 ufw allow 443/tcp   >/dev/null || UFW_OK=0
+
 ufw allow 8090/tcp  >/dev/null || UFW_OK=0
 ufw allow 7080/tcp  >/dev/null || UFW_OK=0
+
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
 
@@ -263,10 +289,10 @@ ufw allow 995/tcp   >/dev/null || UFW_OK=0
 ufw allow 143/tcp   >/dev/null || UFW_OK=0
 ufw allow 993/tcp   >/dev/null || UFW_OK=0
 
-ufw allow 21/tcp           >/dev/null || UFW_OK=0
-ufw allow 40110:40210/tcp  >/dev/null || UFW_OK=0
+ufw allow 21/tcp          >/dev/null || UFW_OK=0
+ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
 
-ufw default deny incoming  >/dev/null || UFW_OK=0
+ufw default deny incoming >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
@@ -291,14 +317,14 @@ log "Installing Maldet..."
 TMP_DIR="/tmp/maldet-install"
 mkdir -p "$TMP_DIR"
 
-MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
 MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
+MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
+
 MALDET_INST_OK=0
 
 if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
   tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
   MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-
   if [[ -n "$MALDET_SRC_DIR" ]]; then
     (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
   fi
@@ -307,50 +333,47 @@ fi
 if [[ -f /usr/local/maldetect/conf.maldet ]]; then
   sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
   sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
+  STEP_maldet_install="OK"
 fi
-
-[[ $MALDET_INST_OK -eq 1 ]] && STEP_maldet_install="OK"
 
 # ----------------- Weekly Malware Scan ----------------- #
 
 CRON_MALWARE="/etc/cron.d/weekly-malware-scan"
 
-log "Creating weekly malware scan cron..."
+log "Creating weekly malware scan cron job..."
 
 cat > "$CRON_MALWARE" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
 30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
 
 chmod 644 "$CRON_MALWARE"
 STEP_weekly_malware_cron="OK"
 
-# ----------------- Initial Security Update ----------------- #
+# ----------------- Initial Upgrade ----------------- #
 
 log "Running initial unattended security upgrade..."
+
 if unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1; then
   STEP_initial_unattended_upgrade="OK"
 fi
 
-# ----------------- Reboot Notification (NEW) ----------------- #
+# ----------------- Reboot Notification ----------------- #
 
 if [[ -f /var/run/reboot-required ]]; then
   echo "--------------------------------------------------------"
-  echo "[INFO] A system reboot is required to complete updates."
-  echo "[INFO] It will automatically occur at the next window:"
-  echo "       → 14:00"
+  echo "[INFO] A system reboot is required."
+  echo "[INFO] It will automatically reboot at 14:00."
   echo "--------------------------------------------------------"
 fi
 
 # ----------------- Summary ----------------- #
 
 echo
-echo "========================================================"
-echo " Secure Server Setup Summary"
-echo "========================================================"
+echo "================ Secure Server Setup Summary ================"
 printf "update_base_packages           : %s\n" "$STEP_update_base_packages"
+printf "livepatch                      : %s\n" "$STEP_livepatch"
 printf "auto_security_updates          : %s\n" "$STEP_auto_security_updates"
 printf "ssh_hardening                  : %s\n" "$STEP_ssh_hardening"
 printf "fail2ban_config                : %s\n" "$STEP_fail2ban_config"
@@ -359,10 +382,10 @@ printf "clamav_install                 : %s\n" "$STEP_clamav_install"
 printf "maldet_install                 : %s\n" "$STEP_maldet_install"
 printf "weekly_malware_cron            : %s\n" "$STEP_weekly_malware_cron"
 printf "initial_unattended_upgrade     : %s\n" "$STEP_initial_unattended_upgrade"
-echo "========================================================"
-echo "[INFO] Any step marked 'FAILED' should be investigated."
+echo "=============================================================="
 echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
+
 exit 0
