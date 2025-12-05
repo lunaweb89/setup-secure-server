@@ -17,8 +17,8 @@
 # Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
 
-set -u   # strict on unset vars
-set -o pipefail
+set -u           # strict on unset vars
+set -o pipefail  # fail on pipeline errors
 
 # ----------------- Step Status ----------------- #
 STEP_update_base_packages="FAILED"
@@ -66,7 +66,9 @@ get_codename() {
 apt_update_retry() {
   local tries=0 max_tries=3
   while (( tries < max_tries )); do
-    if apt-get update -qq; then return 0; fi
+    if apt-get update -qq; then
+      return 0
+    fi
     log "apt-get update failed (attempt $((tries+1))/$max_tries), retrying in 5s..."
     tries=$((tries + 1))
     sleep 5
@@ -75,9 +77,12 @@ apt_update_retry() {
 }
 
 apt_install_retry() {
-  local tries=0 max_tries=3 pkgs=("$@")
+  local tries=0 max_tries=3
+  local pkgs=("$@")
   while (( tries < max_tries )); do
-    if apt-get install -y -qq "${pkgs[@]}"; then return 0; fi
+    if apt-get install -y -qq "${pkgs[@]}"; then
+      return 0
+    fi
     log "apt-get install ${pkgs[*]} failed — running apt-get -f install..."
     apt-get -f install -y || true
     tries=$((tries + 1))
@@ -150,7 +155,7 @@ fi
 
 # ----------------- SSH ensure service exists ----------------- #
 
-systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
+systemctl enable ssh  >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
 systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 CODENAME="$(get_codename)"
@@ -186,16 +191,17 @@ Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 EOF
 
+  # Weekly APT periodic security upgrades
   cat > "$AU" <<EOF
 APT::Periodic::Update-Package-Lists "7";
 APT::Periodic::Unattended-Upgrade "7";
 EOF
 
-  # Monthly updates on 1st at 13:30
+  # Monthly explicit run on 1st at 10:30
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
+30 10 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
 EOF
 
   chmod 644 "$CRON_UPDATES"
@@ -279,11 +285,11 @@ ufw limit 2808/tcp  >/dev/null || true
 ufw allow 80/tcp    >/dev/null || UFW_OK=0
 ufw allow 443/tcp   >/dev/null || UFW_OK=0
 
-# App ports
+# App ports (CyberPanel / OLS WebAdmin)
 ufw allow 8090/tcp  >/dev/null || UFW_OK=0
 ufw allow 7080/tcp  >/dev/null || UFW_OK=0
 
-# DNS
+# DNS (inbound + outbound, TCP + UDP)
 ufw allow 53/tcp    >/dev/null || UFW_OK=0
 ufw allow 53/udp    >/dev/null || UFW_OK=0
 ufw allow out 53/tcp >/dev/null || UFW_OK=0
@@ -302,10 +308,11 @@ ufw allow 993/tcp   >/dev/null || UFW_OK=0
 ufw allow 21/tcp          >/dev/null || UFW_OK=0
 ufw allow 40110:40210/tcp >/dev/null || UFW_OK=0
 
-# Livepatch + Snapd traffic
+# Livepatch + Snapd / HTTPS egress
 ufw allow out 443/tcp >/dev/null || UFW_OK=0
 
-ufw default deny incoming >/dev/null || UFW_OK=0
+# Default policies
+ufw default deny incoming  >/dev/null || UFW_OK=0
 ufw default allow outgoing >/dev/null || UFW_OK=0
 
 ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
@@ -336,16 +343,27 @@ MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
 MALDET_INST_OK=0
 
 if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
-  tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
-  MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-  if [[ -n "$MALDET_SRC_DIR" ]]; then
-    (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
+  if tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"; then
+    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
+    if [[ -n "$MALDET_SRC_DIR" ]]; then
+      if (cd "$MALDET_SRC_DIR" && bash install.sh); then
+        MALDET_INST_OK=1
+      else
+        log "ERROR: Maldet install.sh failed."
+      fi
+    else
+      log "ERROR: Could not locate Maldet source directory after extraction."
+    fi
+  else
+    log "ERROR: Failed to extract Maldet tarball."
   fi
+else
+  log "ERROR: Failed to download Maldet from $MALDET_URL"
 fi
 
 if [[ -f /usr/local/maldetect/conf.maldet ]]; then
-  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
-  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet || true
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet || true
   STEP_maldet_install="OK"
 fi
 
@@ -358,7 +376,7 @@ log "Creating weekly malware scan cron job..."
 cat > "$CRON_MALWARE" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
+30 11 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
 EOF
 
 chmod 644 "$CRON_MALWARE"
@@ -405,7 +423,7 @@ echo
 # -------------------------------------------------------------
 log "Running Backup + Storage Box module..."
 
-bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-backup-module.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-backup-module.sh)
 
 if [[ $? -eq 0 ]]; then
   log "Backup module completed successfully."
