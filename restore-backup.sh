@@ -143,6 +143,7 @@ if [[ "$MODE" == "1" ]]; then
   fi
 
   log "Starting full borg extract (this may take a while)..."
+  # IMPORTANT: ARCHIVE argument must be "$REPOSITORY::$ARCHIVE"
   if "$BORG_BIN" extract --progress --destination "$TARGET" "$REPOSITORY::$ARCHIVE"; then
     log "Full restore completed successfully into $TARGET"
     exit 0
@@ -226,7 +227,6 @@ else
   done
 fi
 
-# Deduplicate in SELECTED_DOMAINS (just in case)
 if (( ${#SELECTED_DOMAINS[@]} == 0 )); then
   err "No domains selected."
   exit 1
@@ -299,6 +299,7 @@ log "Starting partial borg extract into: $TARGET"
 echo "This may take a few minutes depending on archive size."
 echo
 
+# IMPORTANT: first non-option after flags *must* be ARCHIVE ("$REPOSITORY::$ARCHIVE")
 if "$BORG_BIN" extract --progress --destination "$TARGET" "$REPOSITORY::$ARCHIVE" "${PATHS[@]}"; then
   log "Partial restore completed successfully into $TARGET"
   echo
