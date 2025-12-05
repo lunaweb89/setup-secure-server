@@ -115,7 +115,7 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-    # Check if machine is already attached (pro status exits 0 even when "not attached")
+    # Attach if needed (pro status exits 0 even when not attached, so check text)
     if pro status 2>&1 | grep -qi "not attached"; then
       log "Machine is NOT attached to Ubuntu Pro — attaching now..."
       if pro attach "$UBUNTU_PRO_TOKEN"; then
@@ -127,29 +127,27 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
       log "Ubuntu Pro already attached; skipping 'pro attach'."
     fi
 
-    # Now check if Livepatch is already enabled
-    if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
+    # Helper: check if Livepatch is reported enabled
+    is_livepatch_enabled() {
+      pro status 2>/dev/null | awk '/livepatch/ {print tolower($0)}' | grep -q 'enabled'
+    }
+
+    # If already enabled, don't even try to enable again
+    if is_livepatch_enabled; then
       log "Livepatch already enabled via Ubuntu Pro."
       STEP_livepatch="OK"
     else
-      log "Enabling Livepatch via 'pro enable livepatch'..."
-      if pro enable livepatch >/dev/null 2>&1; then
-        if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
-          log "Livepatch enabled successfully via Ubuntu Pro."
-          STEP_livepatch="OK"
-        else
-          log "WARNING: Livepatch enable command ran, but status not confirmed as enabled."
-          STEP_livepatch="FAILED"
-        fi
+      log "Enabling Livepatch via 'pro enable livepatch' (ignore errors if already enabled)..."
+      # Do NOT trust the exit code; some versions return non-zero even when it works
+      pro enable livepatch >/tmp/pro-livepatch.log 2>&1 || true
+
+      if is_livepatch_enabled; then
+        log "Livepatch enabled (or already enabled) according to 'pro status'."
+        STEP_livepatch="OK"
       else
-        # Even if 'pro enable livepatch' fails, double-check status
-        if pro status 2>/dev/null | grep -qi 'livepatch.*enabled'; then
-          log "Livepatch appears enabled despite 'pro enable livepatch' error."
-          STEP_livepatch="OK"
-        else
-          log "WARNING: 'pro enable livepatch' failed and Livepatch not reported enabled."
-          STEP_livepatch="FAILED"
-        fi
+        log "WARNING: Livepatch still not reported as enabled after 'pro enable livepatch'."
+        log "         See /tmp/pro-livepatch.log for details."
+        STEP_livepatch="FAILED"
       fi
     fi
   fi
