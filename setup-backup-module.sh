@@ -370,13 +370,19 @@ echo
 log "Backup module installation finished successfully."
 
 echo "------------------------------------------------------------"
-echo " IMPORTANT: SAVE YOUR BORG PASSPHRASE"
+echo " IMPORTANT: SAVE YOUR BORG PASSPHRASE + REPOSITORY URL"
 echo "------------------------------------------------------------"
-echo "${BORG_PASSPHRASE}"
+echo "Borg Passphrase:"
+echo "  ${BORG_PASSPHRASE}"
+echo
+echo "Repository URL:"
+echo "  ${REPOSITORY}"
 echo "------------------------------------------------------------"
-echo "The passphrase is stored locally at: /root/.borg-passphrase"
-echo "The repository URL is stored at:    /root/.borg-repository"
-echo "You must save the above passphrase somewhere safe."
+echo "Stored locally:"
+echo "  Passphrase:  /root/.borg-passphrase"
+echo "  Repo URL:    /root/.borg-repository"
+echo
+echo "You MUST save the passphrase + repo URL safely for disaster recovery."
 echo
 
 log "Running borg-passphrase-test.sh to verify access (using ssh key; may prompt if key not working)..."
