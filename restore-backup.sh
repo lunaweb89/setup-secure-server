@@ -207,9 +207,9 @@ if ! borg list "$REPOSITORY::$ARCHIVE" --format '{path}{NEWLINE}' > "$TMP_PATHS"
   exit 1
 fi
 
-log "Scanning archive for WordPress sites (wp-config.php under home/*/public_html)..."
+log "Scanning archive for WordPress sites (any wp-config.php under home/<domain>/...)..."
 mapfile -t WP_CONFIGS < <(
-  grep -E '^home/[^/]+/public_html/wp-config\.php$' "$TMP_PATHS" || true
+  grep -E '^home/[^/]+/.*/wp-config\.php$' "$TMP_PATHS" || true
 )
 
 if (( ${#WP_CONFIGS[@]} == 0 )); then
@@ -222,13 +222,13 @@ DOMAINS=()
 declare -A SEEN
 
 for p in "${WP_CONFIGS[@]}"; do
-  # path form: home/example.com/public_html/wp-config.php
+  # Extract domain name from path: home/<domain>/...
   domain="$(echo "$p" | cut -d'/' -f2)"
   if [[ -n "$domain" && -z "${SEEN[$domain]+x}" ]]; then
     SEEN["$domain"]=1
     DOMAINS+=("$domain")
   fi
-fi
+done
 
 if (( ${#DOMAINS[@]} == 0 )); then
   rm -f "$TMP_PATHS"
