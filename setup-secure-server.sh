@@ -405,7 +405,7 @@ echo
 # -------------------------------------------------------------
 log "Running Backup + Storage Box module..."
 
-bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/server-backups/main/setup-backup-module.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server.sh/main/setup-backup-module.sh)
 
 if [[ $? -eq 0 ]]; then
   log "Backup module completed successfully."
