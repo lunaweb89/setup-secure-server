@@ -380,7 +380,7 @@ else
     log "ERROR: Failed to install ClamAV packages."
   fi
 fi
-# ----------------- Maldet Installation ----------------- #
+# ----------------- Maldet ----------------- #
 
 log "Checking Maldet installation..."
 
@@ -388,7 +388,6 @@ MALDET_CONF="/usr/local/maldetect/conf.maldet"
 
 if [[ -x /usr/local/maldetect/maldet || -x /usr/local/sbin/maldet || -x /usr/local/sbin/lmd ]]; then
   log "Maldet already installed; skipping re-install."
-  STEP_maldet_install="OK"
 else
   log "Installing Maldet..."
 
@@ -403,15 +402,21 @@ else
     MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
     if [[ -n "$MALDET_SRC_DIR" ]]; then
       (cd "$MALDET_SRC_DIR" && bash install.sh) || log "WARNING: Maldet install.sh returned a non-zero exit."
-      STEP_maldet_install="OK"
     else
       log "WARNING: Could not find extracted Maldet source directory."
-      STEP_maldet_install="FAILED"
     fi
   else
     log "WARNING: Failed to download Maldet tarball."
-    STEP_maldet_install="FAILED"
   fi
+fi
+
+# Configure Maldet if config exists (whether newly installed or already present)
+if [[ -f "$MALDET_CONF" ]]; then
+  sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF"
+  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF"
+  STEP_maldet_install="OK"
+else
+  log "WARNING: Maldet config file not found at $MALDET_CONF"
 fi
 
 # ----------------- Weekly Malware Scan ----------------- #
