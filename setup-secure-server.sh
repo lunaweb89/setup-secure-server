@@ -215,7 +215,7 @@ backup "$SSH_HARDEN"
 log "Applying SSH hardening (SSH on port $CUSTOM_SSH_PORT only, root+password allowed)..."
 
 # Overwrite existing Port line in sshd_config
-sudo sed -i "/^Port/ c\Port $CUSTOM_SSH_PORT" /etc/ssh/sshd_config
+sudo sed -i "s/^Port [0-9]\+/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
 sudo systemctl restart sshd
 
 # ----------------- UFW Firewall ----------------- #
@@ -223,6 +223,7 @@ log "Configuring UFW firewall to allow port $CUSTOM_SSH_PORT..."
 
 # Allow the custom SSH port in UFW
 sudo ufw allow $CUSTOM_SSH_PORT/tcp
+sudo ufw allow $CUSTOM_SSH_PORT/tcp comment "Custom SSH Port" >/dev/null
 sudo ufw reload
 
 # ----------------- Fail2Ban ----------------- #
