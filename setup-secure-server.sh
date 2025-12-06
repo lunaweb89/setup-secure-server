@@ -95,11 +95,11 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "============================================================"
 echo " Please specify the custom SSH port you'd like to use."
-echo " The default is 2808, but you can enter any valid port number."
+echo " The default is 22, but you can enter any valid port number."
 echo " Ensure that the chosen port is not in use and is not blocked."
 echo "============================================================"
-read -p "Enter SSH custom port (default: 2808): " CUSTOM_SSH_PORT
-CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-2808}"
+read -p "Enter SSH custom port (default: 22): " CUSTOM_SSH_PORT
+CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
 
 log "Using SSH port: $CUSTOM_SSH_PORT"
 
@@ -267,26 +267,39 @@ else
   log "[WARNING] SSH hardening not fully applied because sshd -t failed earlier."
 fi
 
-# ----------------- UFW Firewall ----------------- #
+# ----------------- Verify SSH Connectivity ----------------- #
 
-log "Configuring UFW firewall..."
+log "Verifying SSH connectivity on port $CUSTOM_SSH_PORT..."
 
-UFW_OK=1
+# Best-effort guess of primary server IP (for info only)
+SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+  SERVER_IP_GUESS="127.0.0.1"
+fi
 
-# Remove any existing OpenSSH / 22 rules so SSH is ONLY on custom port
-ufw delete allow OpenSSH  >/dev/null 2>&1 || true
-ufw delete limit OpenSSH  >/dev/null 2>&1 || true
-ufw delete allow 22/tcp   >/dev/null 2>&1 || true
-ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+read -r -p "Enter server IP/hostname to test TCP on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
 
-# Allow custom SSH port and other necessary ports
-ufw allow $CUSTOM_SSH_PORT/tcp  >/dev/null || UFW_OK=0
-ufw allow 80/tcp              >/dev/null || UFW_OK=0
-ufw allow 443/tcp             >/dev/null || UFW_OK=0
-ufw allow 8090/tcp            >/dev/null || UFW_OK=0
-ufw allow 7080/tcp            >/dev/null || UFW_OK=0
+# Try to ensure we have a TCP testing tool
+TCP_TEST_OK=0
 
-ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+if command -v nc >/dev/null 2>&1; then
+  if nc -zw5 "$SSH_TEST_HOST" "$CUSTOM_SSH_PORT" >/dev/null 2>&1; then
+    log "[OK] TCP connection to ${SSH_TEST_HOST}:${CUSTOM_SSH_PORT} succeeded (port is open)."
+    TCP_TEST_OK=1
+  else
+    log "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:${CUSTOM_SSH_PORT} FAILED."
+    log "    Check that sshd is listening on port $CUSTOM_SSH_PORT and that UFW allows it."
+  fi
+else
+  log "[-] WARNING: netcat (nc) not found; skipping connectivity test."
+fi
+
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  log "[INFO] SSH on port $CUSTOM_SSH_PORT appears reachable."
+else
+  log "[INFO] Please verify SSH access from your own machine before closing this session."
+fi
 
 # ----------------- Final Steps ----------------- #
 log "Setup complete. Please verify SSH access on port $CUSTOM_SSH_PORT."
