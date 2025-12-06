@@ -243,6 +243,7 @@ if ! dpkg -l | grep -q clamav; then
   fi
 else
   log "ClamAV already installed, skipping."
+  STEP_clamav_install="OK"
 fi
 
 # ----------------- Maldet ----------------- #
@@ -273,6 +274,7 @@ if ! dpkg -l | grep -q maldet; then
   fi
 else
   log "Maldet already installed, skipping."
+  STEP_maldet_install="OK"
 fi
 
 # ----------------- Weekly Malware Scan ----------------- #
