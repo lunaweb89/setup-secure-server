@@ -456,47 +456,61 @@ echo " - /var/log/weekly-malware-scan.log"
 echo
 
 # ----------------- SSH Connectivity Test (Port 2808) ----------------- #
+# Non-interactive TCP check so the script flow is not disrupted
 
-# Make sure ssh client exists (usually already installed)
-if ! command -v ssh >/dev/null 2>&1; then
-  log "ssh client not found — installing openssh-client..."
-  apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
+echo "================ SSH Connectivity Test (port 2808) ================"
+
+# Best-effort guess of primary server IP (for info only)
+SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+  SERVER_IP_GUESS="127.0.0.1"
 fi
 
-if command -v ssh >/dev/null 2>&1; then
-  echo "================ SSH Connectivity Test (port 2808) ================"
-  # Best-effort guess of primary server IP
-  SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
-    SERVER_IP_GUESS="127.0.0.1"
-  fi
+read -r -p "Enter server IP/hostname to test TCP on port 2808 [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
 
-  read -r -p "Enter server IP/hostname to test SSH on port 2808 [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
-  SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
+# Try to ensure we have a TCP testing tool
+TCP_TEST_OK=0
 
-  echo
-  echo "[INFO] The script will now start a TEST SSH session:"
-  echo "       ssh -p 2808 root@${SSH_TEST_HOST}"
-  echo "       Log in with your ROOT password, verify it works, then type 'exit'"
-  echo "       to return to this setup script."
-  read -r -p "Press ENTER to start the SSH test..." _
-
-  ssh -p 2808 "root@${SSH_TEST_HOST}"
-  SSH_TEST_RC=$?
-
-  if [[ "$SSH_TEST_RC" -eq 0 ]]; then
-    echo "[OK] SSH test session to root@${SSH_TEST_HOST}:2808 completed successfully."
-    echo "     You should now be safe to reconnect on port 2808 after a reboot."
-  else
-    echo "[-] WARNING: SSH test to root@${SSH_TEST_HOST}:2808 failed or was aborted (exit code: $SSH_TEST_RC)."
-    echo "    Do NOT close your current SSH session until you have fixed SSH/Firewall settings."
-  fi
-
-  echo "=================================================================="
-  echo
+if command -v nc >/dev/null 2>&1; then
+  :
 else
-  echo "[-] WARNING: ssh client is not available; skipping SSH connectivity test."
+  log "netcat (nc) not found — installing netcat-openbsd for TCP check..."
+  apt_install_retry netcat-openbsd || log "WARNING: Failed to install netcat-openbsd; will try /dev/tcp fallback."
 fi
+
+if command -v nc >/dev/null 2>&1; then
+  # Use netcat to test connectivity (no SSH login, just TCP connect)
+  if nc -zw5 "$SSH_TEST_HOST" 2808 >/dev/null 2>&1; then
+    echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (port is open)."
+    TCP_TEST_OK=1
+  else
+    echo "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:2808 FAILED."
+    echo "    Check that sshd is listening on port 2808 and that UFW allows it."
+  fi
+else
+  # Fallback: bash /dev/tcp trick with timeout
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout 5 bash -c "echo >/dev/tcp/${SSH_TEST_HOST}/2808" 2>/dev/null; then
+      echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (via /dev/tcp)."
+      TCP_TEST_OK=1
+    else
+      echo "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:2808 FAILED (via /dev/tcp)."
+      echo "    Check that sshd is listening on port 2808 and that UFW allows it."
+    fi
+  else
+    echo "[-] WARNING: No nc or timeout available; skipping automated TCP test."
+  fi
+fi
+
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  echo "[INFO] SSH on port 2808 appears reachable locally."
+else
+  echo "[INFO] Please verify SSH access from your own machine before closing this session."
+fi
+
+echo "=================================================================="
+echo
 
 # -------------------------------------------------------------
 # Optional: Run external backup module (GitHub-hosted)
