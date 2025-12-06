@@ -373,7 +373,7 @@ FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
 backup "$FIREWALLD_SERVICE"
 backup "$FIREWALLD_ZONE"
 
-# Create or update the SSHCustom.xml service for custom SSH port
+# Create or update the SSHCustom.xml service for the custom SSH port
 cat > "$FIREWALLD_SERVICE" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
@@ -381,20 +381,29 @@ cat > "$FIREWALLD_SERVICE" <<EOF
 </service>
 EOF
 
-# Update the public zone to allow the custom SSH port
+# Check if the custom port exists in the public zone and add if not
 if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
-  # Adding custom port rule to the public zone
-  sed -i "/<\/zone>/i \  <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"\/>" "$FIREWALLD_ZONE"
+  # Adding custom port rule for both IPv4 and IPv6
+  sed -i "/<\/zone>/i \
+  <rule family=\"ipv4\">\n\
+    <source address=\"0.0.0.0/0\"/>\n\
+    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
+    <accept/>\n\
+  </rule>\n\
+  <rule family=\"ipv6\">\n\
+    <source address=\"::/0\"/>\n\
+    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
+    <accept/>\n\
+  </rule>" "$FIREWALLD_ZONE"
+
+  # Reload firewalld to apply changes to public zone and service
   firewall-cmd --reload
   log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
 else
   log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
 fi
 
-# Reload firewalld to apply changes to SSHCustom service
-firewall-cmd --reload
-
-# Add the custom port permanently
+# Add the custom SSH port to firewalld permanently
 firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent
 
 # Reload firewalld to apply the new port configuration
