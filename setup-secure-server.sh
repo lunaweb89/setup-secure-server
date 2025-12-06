@@ -501,7 +501,6 @@ echo " - /var/log/weekly-malware-scan.log"
 echo
 
 # ----------------- SSH Connectivity Test (Port 2808) ----------------- #
-# Non-interactive TCP check so the script flow is not disrupted
 
 echo "================ SSH Connectivity Test (port 2808) ================"
 
@@ -514,18 +513,9 @@ fi
 read -r -p "Enter server IP/hostname to test TCP on port 2808 [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
 SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
 
-# Try to ensure we have a TCP testing tool
+# Test TCP connection first (without SSH login)
 TCP_TEST_OK=0
-
 if command -v nc >/dev/null 2>&1; then
-  :
-else
-  log "netcat (nc) not found — installing netcat-openbsd for TCP check..."
-  apt_install_retry netcat-openbsd || log "WARNING: Failed to install netcat-openbsd; will try /dev/tcp fallback."
-fi
-
-if command -v nc >/dev/null 2>&1; then
-  # Use netcat to test connectivity (no SSH login, just TCP connect)
   if nc -zw5 "$SSH_TEST_HOST" 2808 >/dev/null 2>&1; then
     echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (port is open)."
     TCP_TEST_OK=1
@@ -534,28 +524,36 @@ if command -v nc >/dev/null 2>&1; then
     echo "    Check that sshd is listening on port 2808 and that UFW allows it."
   fi
 else
-  # Fallback: bash /dev/tcp trick with timeout
-  if command -v timeout >/dev/null 2>&1; then
-    if timeout 5 bash -c "echo >/dev/tcp/${SSH_TEST_HOST}/2808" 2>/dev/null; then
-      echo "[OK] TCP connection to ${SSH_TEST_HOST}:2808 succeeded (via /dev/tcp)."
-      TCP_TEST_OK=1
-    else
-      echo "[-] WARNING: TCP connection to ${SSH_TEST_HOST}:2808 FAILED (via /dev/tcp)."
-      echo "    Check that sshd is listening on port 2808 and that UFW allows it."
-    fi
+  echo "[-] WARNING: netcat (nc) not found — skipping TCP test."
+  TCP_TEST_OK=0
+fi
+
+# If TCP test is successful, attempt SSH login to the server
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  echo "[INFO] Attempting SSH login on port 2808..."
+
+  # Attempt SSH login with user input for username (default root)
+  read -r -p "Enter the username for SSH login (default: root): " SSH_USER
+  SSH_USER="${SSH_USER:-root}"
+
+  # Test SSH login using the provided username and port 2808
+  SSH_TEST_OK=0
+  if ssh -p 2808 "$SSH_USER@$SSH_TEST_HOST" 'exit' >/dev/null 2>&1; then
+    echo "[OK] SSH login successful on ${SSH_TEST_HOST}:2808."
+    SSH_TEST_OK=1
   else
-    echo "[-] WARNING: No nc or timeout available; skipping automated TCP test."
+    echo "[-] WARNING: SSH login to ${SSH_TEST_HOST}:2808 FAILED."
+    echo "    Check SSH server configuration and ensure the correct port is open."
   fi
 fi
 
-if [[ "$TCP_TEST_OK" -eq 1 ]]; then
-  echo "[INFO] SSH on port 2808 appears reachable."
+if [[ "$SSH_TEST_OK" -eq 1 ]]; then
+  echo "[INFO] SSH on port 2808 appears to be working correctly."
 else
   echo "[INFO] Please verify SSH access from your own machine before closing this session."
 fi
 
 echo "=================================================================="
-echo
 
 # -------------------------------------------------------------
 # Optional: Run external backup module (GitHub-hosted)
