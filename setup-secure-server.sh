@@ -319,16 +319,16 @@ log "Configuring UFW firewall..."
 
 UFW_OK=1
 
-# Remove any existing OpenSSH / 22 rules so SSH is ONLY on 2808
+# Allow SSH on both port 22 (default) and port 2808
 ufw delete allow OpenSSH  >/dev/null 2>&1 || true
 ufw delete limit OpenSSH  >/dev/null 2>&1 || true
 ufw delete allow 22/tcp   >/dev/null 2>&1 || true
 ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
-# SSH custom port (2808) with rate-limiting
-ufw limit 2808/tcp        >/dev/null || UFW_OK=0
+# Ensure port 2808 is allowed
+ufw allow 2808/tcp        >/dev/null || UFW_OK=0
 
-# HTTP/HTTPS
+# Allow other essential ports
 ufw allow 80/tcp          >/dev/null || UFW_OK=0
 ufw allow 443/tcp         >/dev/null || UFW_OK=0
 
