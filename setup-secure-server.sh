@@ -214,34 +214,9 @@ backup "$SSH_HARDEN"
 
 log "Applying SSH hardening (SSH on port $CUSTOM_SSH_PORT only, root+password allowed)..."
 
-SSH_CONFIG_OK=0
-
-# Set SSH port to custom port
-if cat > "$SSH_HARDEN" <<EOF
-# SSH Hardening
-Port $CUSTOM_SSH_PORT
-Protocol 2
-PermitRootLogin yes
-PasswordAuthentication yes
-ChallengeResponseAuthentication no
-PermitEmptyPasswords no
-UsePAM yes
-X11Forwarding no
-AllowTcpForwarding yes
-AllowAgentForwarding yes
-LoginGraceTime 30
-MaxAuthTries 5
-ClientAliveInterval 300
-ClientAliveCountMax 2
-EOF
-then
-  if sshd -t 2>/dev/null; then
-    log "SSH configuration syntax OK."
-    SSH_CONFIG_OK=1
-  else
-    log "ERROR: SSH config test failed. Not reloading sshd."
-  fi
-fi
+# Overwrite existing Port line in sshd_config
+sudo sed -i "/^Port/ c\Port $CUSTOM_SSH_PORT" /etc/ssh/sshd_config
+sudo systemctl restart sshd
 
 # ----------------- UFW Firewall ----------------- #
 log "Configuring UFW firewall to allow port $CUSTOM_SSH_PORT..."
@@ -256,30 +231,6 @@ log "Configuring Fail2Ban for custom SSH port $CUSTOM_SSH_PORT..."
 # Modify Fail2Ban config to use the custom port
 sudo sed -i "s/^port = ssh/port = $CUSTOM_SSH_PORT/" /etc/fail2ban/jail.local
 sudo systemctl restart fail2ban
-
-# Reload SSH only after the firewall is updated and port is allowed
-if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
-  log "[Pre-check] Ensuring firewall allows SSH port $CUSTOM_SSH_PORT before reloading sshd..."
-
-  # Make sure UFW is allowing port $CUSTOM_SSH_PORT
-  if ufw status | grep -E "$CUSTOM_SSH_PORT/tcp" | grep -E 'ALLOW|LIMIT' >/dev/null 2>&1; then
-    log "UFW confirms port $CUSTOM_SSH_PORT is open. Proceeding to reload SSH..."
-
-    # Reload SSH to apply the new port
-    if systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1; then
-      log "SSH reloaded successfully. SSH now listens ONLY on port $CUSTOM_SSH_PORT."
-      STEP_ssh_hardening="OK"
-    else
-      log "WARNING: Failed to reload sshd. Check 'systemctl status ssh' and logs."
-    fi
-  else
-    log "[WARNING] UFW does not show an ALLOW/LIMIT rule for $CUSTOM_SSH_PORT/tcp."
-    log "[WARNING] Not reloading sshd to avoid locking you out."
-    log "[INFO] After fixing firewall, run: systemctl reload ssh"
-  fi
-else
-  log "[WARNING] SSH hardening not fully applied because sshd -t failed earlier."
-fi
 
 # ----------------- Verify SSH Connectivity ----------------- #
 
