@@ -259,17 +259,19 @@ SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
 
-log "Applying SSH hardening (SSH on $LOGGED_PORT only, root+password allowed)..."
+log "Applying SSH hardening (SSH on $CUSTOM_SSH_PORT only, root+password allowed)..."
 
-# Overwrite the existing Port line with custom port if it exists in sshd_config
+# Overwrite the existing Port line with the custom port if it exists in sshd_config
 if grep -q "^Port" /etc/ssh/sshd_config; then
+  # Replace the existing Port line with the custom port
   sed -i "s/^Port.*/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
 else
+  # If no Port line exists, add the custom port at the end
   echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
 fi
 
+# Create or update SSH hardening file
 SSH_CONFIG_OK=0
-
 if cat > "$SSH_HARDEN" <<EOF
 # SSH Hardening
 Port $CUSTOM_SSH_PORT
@@ -288,12 +290,24 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
 then
+  # Test the SSH configuration
   if sshd -t 2>/dev/null; then
     log "SSH configuration syntax OK. Reload will be done AFTER firewall check."
     SSH_CONFIG_OK=1
   else
     log "ERROR: SSH config test failed. Not reloading sshd."
   fi
+fi
+
+# Reload SSH service to apply changes
+if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
+  log "Reloading SSH service to apply custom port..."
+  systemctl restart sshd
+
+  # Check if the SSH service is listening on the custom port
+  ss -tuln | grep "$CUSTOM_SSH_PORT" && log "SSH is now listening on port $CUSTOM_SSH_PORT"
+else
+  log "SSH hardening failed, configuration not reloaded."
 fi
 
 # ----------------- Fail2Ban ----------------- #
