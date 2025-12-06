@@ -34,8 +34,10 @@ STEP_initial_unattended_upgrade="FAILED"
 
 # ----------------- Custom Port Configuration ----------------- #
 # Prompt the user to enter the custom SSH port before applying hardening
-read -r -p "Enter custom SSH port (e.g., 2808) [2808]: " CUSTOM_SSH_PORT
-CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-2808}"
+read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " CUSTOM_SSH_PORT
+
+# Use port 22 as the default if the user presses enter without typing anything
+CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
 LOGGED_PORT="Custom port"  # Masked output for SSH port
 
 # ----------------- Helpers ----------------- #
