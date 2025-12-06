@@ -504,7 +504,7 @@ else
 fi
 
 if [[ "$TCP_TEST_OK" -eq 1 ]]; then
-  echo "[INFO] SSH on port 2808 appears reachable locally."
+  echo "[INFO] SSH on port 2808 appears reachable."
 else
   echo "[INFO] Please verify SSH access from your own machine before closing this session."
 fi
