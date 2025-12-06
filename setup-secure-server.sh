@@ -530,8 +530,10 @@ echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
 
+# Restart SSH service immediately to update any changes
+systemctl restart sshd
+
 # ----------------- SSH Connectivity Test (Custom Port) ----------------- #
-#systemctl restart sshd#
 # Make sure ssh client exists (usually already installed)
 if ! command -v ssh >/dev/null 2>&1; then
   log "ssh client not found — installing openssh-client..."
