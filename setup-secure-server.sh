@@ -548,6 +548,20 @@ else
   fi
 fi
 
+# SSH connection check (actual SSH login attempt to confirm)
+if [[ "$TCP_TEST_OK" -eq 1 ]]; then
+  echo "Attempting to SSH into ${SSH_TEST_HOST} on port 2808..."
+
+  # Try SSH connection to the provided host and port
+  if ssh -p 2808 root@"$SSH_TEST_HOST" exit; then
+    echo "[OK] SSH connection to ${SSH_TEST_HOST} on port 2808 succeeded."
+  else
+    echo "[-] WARNING: SSH connection to ${SSH_TEST_HOST} on port 2808 failed."
+    echo "    Check that SSH is correctly configured to listen on port 2808."
+    echo "    You can test manually by running: 'ssh -p 2808 root@${SSH_TEST_HOST}'."
+  fi
+fi
+
 if [[ "$TCP_TEST_OK" -eq 1 ]]; then
   echo "[INFO] SSH on port 2808 appears reachable."
 else
@@ -555,7 +569,6 @@ else
 fi
 
 echo "=================================================================="
-echo
 
 # -------------------------------------------------------------
 # Optional: Run external backup module (GitHub-hosted)
