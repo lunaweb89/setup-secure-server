@@ -128,7 +128,8 @@ log "Configuring Fail2Ban to use the new SSH port..."
 backup "/etc/fail2ban/jail.local"
 
 # Modify the port in Fail2Ban configuration
-sed -i "s/^port     = ssh/port     = $SSH_PORT/" /etc/fail2ban/jail.local
+# This will replace any port setting (like 22 or 2808) with the custom port
+sed -i "s/^port[[:space:]]*=[[:space:]]*[^[:space:]]*/port = $SSH_PORT/" /etc/fail2ban/jail.local
 
 # Restart Fail2Ban service to apply changes
 systemctl restart fail2ban
