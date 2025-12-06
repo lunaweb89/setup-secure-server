@@ -174,130 +174,88 @@ if apt_install_retry lsb-release ca-certificates openssh-server cron ufw fail2ba
   STEP_update_base_packages="OK"
 fi
 
-# ----------------- SSH ensure service exists ----------------- #
+# ----------------- SSH Hardening ----------------- #
+log "Applying SSH hardening..."
+if [ -f "/etc/ssh/sshd_config.d/99-hardening.conf" ]; then
+  log "SSH hardening config file already exists, skipping reconfiguration."
+  STEP_ssh_hardening="OK"
+else
+  SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
+  mkdir -p /etc/ssh/sshd_config.d
+  backup "$SSH_HARDEN"
 
-systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
-systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
-
-CODENAME="$(get_codename)"
-log "Ubuntu codename detected: ${CODENAME:-unknown}"
-
-# ----------------- Automated Security Updates ----------------- #
-
-UU="/etc/apt/apt.conf.d/50unattended-upgrades"
-AU="/etc/apt/apt.conf.d/20auto-upgrades"
-CRON_UPDATES="/etc/cron.d/auto-security-updates"
-
-backup "$UU"
-backup "$AU"
-
-log "Configuring unattended security upgrades..."
-
-{
-  if [[ -n "$CODENAME" ]]; then
-    ORIGIN_PATTERN="origin=Ubuntu,codename=${CODENAME},label=Ubuntu-Security"
+  cat > "$SSH_HARDEN" <<EOF
+  # SSH Hardening
+  Port 2808
+  Protocol 2
+  PermitRootLogin yes
+  PasswordAuthentication yes
+  ChallengeResponseAuthentication no
+  PermitEmptyPasswords no
+  UsePAM yes
+  X11Forwarding no
+  AllowTcpForwarding yes
+  AllowAgentForwarding yes
+  LoginGraceTime 30
+  MaxAuthTries 5
+  ClientAliveInterval 300
+  ClientAliveCountMax 2
+EOF
+  if sshd -t 2>/dev/null; then
+    systemctl reload sshd
+    STEP_ssh_hardening="OK"
   else
-    ORIGIN_PATTERN="origin=Ubuntu,label=Ubuntu-Security"
+    log "ERROR: SSH config test failed. Not reloading sshd."
+    STEP_ssh_hardening="FAILED"
   fi
-
-  cat > "$UU" <<EOF
-Unattended-Upgrade::Origins-Pattern {
-  "${ORIGIN_PATTERN}";
-};
-
-Unattended-Upgrade::Automatic-Reboot "false";
-Unattended-Upgrade::Automatic-Reboot-Time "14:00";
-Unattended-Upgrade::MailOnlyOnError "true";
-Unattended-Upgrade::Remove-Unused-Dependencies "true";
-Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
-EOF
-
-  cat > "$AU" <<EOF
-APT::Periodic::Update-Package-Lists "7";
-APT::Periodic::Unattended-Upgrade "7";
-EOF
-
-  # Monthly updates on 1st at 13:30 (cron in system time)
-  cat > "$CRON_UPDATES" <<'EOF'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 13 1 * * root unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1
-EOF
-
-  chmod 644 "$CRON_UPDATES"
-  STEP_auto_security_updates="OK"
-} || log "ERROR: Failed to configure unattended-upgrades."
-
-# ----------------- ClamAV ----------------- #
-
-log "Checking if ClamAV is installed..."
-if ! dpkg -l | grep -q clamav; then
-  log "ClamAV not installed, installing..."
-  if apt_install_retry clamav clamav-daemon; then
-    systemctl stop clamav-freshclam >/dev/null 2>&1 || true
-    freshclam || log "WARNING: freshclam failed."
-    systemctl enable clamav-freshclam >/dev/null
-    systemctl restart clamav-freshclam >/dev/null
-    systemctl restart clamav-daemon >/dev/null
-    STEP_clamav_install="OK"
-  fi
-else
-  log "ClamAV already installed, skipping."
-  STEP_clamav_install="OK"
 fi
 
-# ----------------- Maldet ----------------- #
+# ----------------- Fail2Ban ----------------- #
+log "Configuring Fail2Ban..."
+FAIL_JAIL="/etc/fail2ban/jail.local"
+mkdir -p /etc/fail2ban
+backup "$FAIL_JAIL"
 
-log "Checking if Maldet is installed..."
-if ! dpkg -l | grep -q maldet; then
-  log "Maldet not installed, installing..."
-  TMP_DIR="/tmp/maldet-install"
-  mkdir -p "$TMP_DIR"
-
-  MALDET_TGZ="$TMP_DIR/maldetect-current.tar.gz"
-  MALDET_URL="https://www.rfxn.com/downloads/maldetect-current.tar.gz"
-
-  MALDET_INST_OK=0
-
-  if wget -q -O "$MALDET_TGZ" "$MALDET_URL"; then
-    tar -xzf "$MALDET_TGZ" -C "$TMP_DIR"
-    MALDET_SRC_DIR="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'maldetect-*' | head -n1)"
-    if [[ -n "$MALDET_SRC_DIR" ]]; then
-      (cd "$MALDET_SRC_DIR" && bash install.sh) && MALDET_INST_OK=1
-    fi
-  fi
-
-  if [[ -f /usr/local/maldetect/conf.maldet ]]; then
-    sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' /usr/local/maldetect/conf.maldet
-    sed -i 's/^scan_clamd=.*/scan_clamd="1"/' /usr/local/maldetect/conf.maldet
-    STEP_maldet_install="OK"
-  fi
+# Check if Fail2Ban config file exists
+if [ -f "$FAIL_JAIL" ]; then
+  log "Fail2Ban configuration already exists, skipping reconfiguration."
+  STEP_fail2ban_config="OK"
 else
-  log "Maldet already installed, skipping."
-  STEP_maldet_install="OK"
+  cat > "$FAIL_JAIL" <<'EOF'
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled  = true
+port     = 2808
+logpath  = %(sshd_log)s
+backend  = systemd
+EOF
+  systemctl enable fail2ban >/dev/null
+  systemctl restart fail2ban >/dev/null
+  STEP_fail2ban_config="OK"
 fi
 
-# ----------------- Weekly Malware Scan ----------------- #
+# ----------------- UFW Firewall ----------------- #
+log "Configuring UFW firewall..."
 
-CRON_MALWARE="/etc/cron.d/weekly-malware-scan"
+UFW_OK=1
 
-log "Creating weekly malware scan cron job..."
-
-cat > "$CRON_MALWARE" <<'EOF'
-SHELL=/bin/bash
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 3 * * 0 root /usr/local/maldetect/maldet -b -r /home 1 >> /var/log/weekly-malware-scan.log 2>&1
-EOF
-
-chmod 644 "$CRON_MALWARE"
-STEP_weekly_malware_cron="OK"
-
-# ----------------- Initial Upgrade ----------------- #
-
-log "Running initial unattended security upgrade..."
-
-if unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1; then
-  STEP_initial_unattended_upgrade="OK"
+# Check if UFW is active
+if ufw status | grep -q "Status: active"; then
+  log "UFW firewall is already active, skipping reconfiguration."
+  STEP_ufw_firewall="OK"
+else
+  ufw limit 2808/tcp >/dev/null || UFW_OK=0
+  ufw allow 80/tcp >/dev/null || UFW_OK=0
+  ufw allow 443/tcp >/dev/null || UFW_OK=0
+  ufw allow 53/tcp >/dev/null || UFW_OK=0
+  ufw allow 53/udp >/dev/null || UFW_OK=0
+  ufw default deny incoming >/dev/null || UFW_OK=0
+  ufw default allow outgoing >/dev/null || UFW_OK=0
+  ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
 fi
 
 # ----------------- Summary ----------------- #
