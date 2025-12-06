@@ -272,6 +272,9 @@ else
   echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
 fi
 
+# Restart SSH service immediately to apply changes
+sudo systemctl restart sshd
+
 # Create or update SSH hardening file
 SSH_CONFIG_OK=0
 if cat > "$SSH_HARDEN" <<EOF
