@@ -33,12 +33,33 @@ STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
 
 # ----------------- Custom Port Configuration ----------------- #
-# Prompt the user to enter the custom SSH port before applying hardening
-read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " CUSTOM_SSH_PORT
 
-# Use port 22 as the default if the user presses enter without typing anything
-CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
+CUSTOM_PORT_ENABLED=0
+CUSTOM_SSH_PORT=22
+
+read -r -p "Do you want to change SSH to a custom port (recommended)? [y/N]: " CHANGE_PORT
+if [[ "$CHANGE_PORT" =~ ^[Yy]$ ]]; then
+  read -r -p "Enter custom SSH port (e.g., 2228) [Default:2228]: " CUSTOM_SSH_PORT
+  CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-2228}"
+  if [[ "$CUSTOM_SSH_PORT" != "22" ]]; then
+    CUSTOM_PORT_ENABLED=1
+  else
+    echo "[+] You selected port 22 even after choosing custom port — treating as NO custom port."
+    CUSTOM_PORT_ENABLED=0
+  fi
+else
+  echo "[+] Keeping SSH on default port 22 (no custom port will be configured)."
+  CUSTOM_SSH_PORT=22
+  CUSTOM_PORT_ENABLED=0
+fi
+
 LOGGED_PORT="Custom port"  # Masked output for SSH port
+
+# Flag: only touch UFW/Firewalld when true (non-22 custom port)
+ENABLE_CUSTOM_FIREWALL=0
+if (( CUSTOM_PORT_ENABLED == 1 )) && [[ "$CUSTOM_SSH_PORT" != "22" ]]; then
+  ENABLE_CUSTOM_FIREWALL=1
+fi
 
 # ----------------- Helpers ----------------- #
 
@@ -260,20 +281,19 @@ EOF
 SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
+backup "/etc/ssh/sshd_config"
 
-log "Applying SSH hardening (SSH on $CUSTOM_SSH_PORT only, root+password allowed)..."
+log "Applying SSH hardening (SSH on $CUSTOM_SSH_PORT, root+password allowed)..."
 
-# Overwrite the existing Port line with the custom port if it exists in sshd_config
+# Overwrite the existing Port line with the chosen port (22 or custom)
 if grep -q "^Port" /etc/ssh/sshd_config; then
-  # Replace the existing Port line with the custom port
   sed -i "s/^Port.*/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
 else
-  # If no Port line exists, add the custom port at the end
   echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
 fi
 
 # Restart SSH service immediately to apply changes
-sudo systemctl restart sshd
+systemctl restart sshd
 
 # Create or update SSH hardening file
 SSH_CONFIG_OK=0
@@ -306,10 +326,9 @@ fi
 
 # Reload SSH service to apply changes if SSH config is OK
 if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
-  log "Reloading SSH service to apply custom port..."
+  log "Reloading SSH service to apply port $CUSTOM_SSH_PORT..."
   systemctl restart sshd
 
-  # Check if the SSH service is listening on the custom port
   ss -tuln | grep "$CUSTOM_SSH_PORT" && log "SSH is now listening on port $CUSTOM_SSH_PORT"
   STEP_ssh_hardening="OK"
 else
@@ -345,46 +364,67 @@ fi
 
 # ----------------- UFW Firewall ----------------- #
 
-log "Configuring UFW firewall..."
+if (( ENABLE_CUSTOM_FIREWALL == 0 )); then
+  log "Custom SSH port NOT enabled (or still 22) — skipping UFW configuration."
+  STEP_ufw_firewall="SKIPPED"
+else
+  log "Configuring UFW firewall for SSH port $CUSTOM_SSH_PORT..."
 
-UFW_OK=1
+  UFW_OK=1
 
-ufw delete allow OpenSSH  >/dev/null 2>&1 || true
-ufw delete limit OpenSSH  >/dev/null 2>&1 || true
-ufw delete allow 22/tcp   >/dev/null 2>&1 || true
-ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+  ufw delete allow OpenSSH  >/dev/null 2>&1 || true
+  ufw delete limit OpenSSH  >/dev/null 2>&1 || true
+  ufw delete allow 22/tcp   >/dev/null 2>&1 || true
+  ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
-# Ensure custom port is allowed
-ufw allow $CUSTOM_SSH_PORT/tcp        >/dev/null || UFW_OK=0
+  ufw allow "$CUSTOM_SSH_PORT"/tcp        >/dev/null || UFW_OK=0
 
-ufw default deny incoming  >/dev/null || UFW_OK=0
-ufw default allow outgoing >/dev/null || UFW_OK=0
+  ufw default deny incoming  >/dev/null || UFW_OK=0
+  ufw default allow outgoing >/dev/null || UFW_OK=0
 
-ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+  ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+
+  if (( UFW_OK == 0 )); then
+    log "WARNING: Some UFW rules may have failed to apply."
+  fi
+fi
 
 # ----------------- Firewalld Configuration ----------------- #
 
-log "Configuring Firewalld..."
+if (( ENABLE_CUSTOM_FIREWALL == 0 )); then
+  log "Custom SSH port NOT enabled (or still 22) — skipping Firewalld configuration."
+else
+  log "Configuring Firewalld for SSH port $CUSTOM_SSH_PORT..."
 
-FIREWALLD_SERVICE="/etc/firewalld/services/SSHCustom.xml"
-FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
+  FIREWALLD_SERVICE="/etc/firewalld/services/SSHCustom.xml"
+  FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
 
-# Backup existing files
-backup "$FIREWALLD_SERVICE"
-backup "$FIREWALLD_ZONE"
+  backup "$FIREWALLD_SERVICE"
+  backup "$FIREWALLD_ZONE"
 
-# Create or update the SSHCustom.xml service for the custom SSH port
-cat > "$FIREWALLD_SERVICE" <<EOF
+  # Create or update the SSHCustom.xml service for the custom SSH port
+  cat > "$FIREWALLD_SERVICE" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
   <port port="$CUSTOM_SSH_PORT" protocol="tcp"/>
 </service>
 EOF
 
-# Check if the custom port exists in the public zone and add if not
-if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
-  # Adding custom port rule for both IPv4 and IPv6
-  sed -i "/<\/zone>/i \
+  # Ensure zone file exists
+  if [[ ! -f "$FIREWALLD_ZONE" ]]; then
+    mkdir -p "$(dirname "$FIREWALLD_ZONE")"
+    cat > "$FIREWALLD_ZONE" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<zone>
+  <short>public</short>
+  <description>Public Zone</description>
+</zone>
+EOF
+  fi
+
+  # Check if the custom port exists in the public zone and add if not
+  if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
+    sed -i "/<\/zone>/i \
   <rule family=\"ipv4\">\n\
     <source address=\"0.0.0.0/0\"/>\n\
     <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
@@ -396,24 +436,20 @@ if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
     <accept/>\n\
   </rule>" "$FIREWALLD_ZONE"
 
-  # Reload firewalld to apply changes to public zone and service
-  firewall-cmd --reload
-  log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
-else
-  log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
-fi
+    firewall-cmd --reload || log "WARNING: firewall-cmd reload failed after zone edit."
+    log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
+  else
+    log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
+  fi
 
-# Add the custom SSH port to firewalld permanently
-firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent
+  firewall-cmd --zone=public --add-port="$CUSTOM_SSH_PORT"/tcp --permanent || log "WARNING: firewall-cmd add-port failed."
+  firewall-cmd --reload || log "WARNING: firewall-cmd reload after add-port failed."
 
-# Reload firewalld to apply the new port configuration
-firewall-cmd --reload
-
-# Check if the new custom SSH port is active in firewalld
-if firewall-cmd --list-ports | grep -q "$CUSTOM_SSH_PORT/tcp"; then
-  log "Custom SSH port $CUSTOM_SSH_PORT added to Firewalld successfully."
-else
-  log "Failed to add custom SSH port $CUSTOM_SSH_PORT to Firewalld."
+  if firewall-cmd --list-ports | grep -q "$CUSTOM_SSH_PORT/tcp"; then
+    log "Custom SSH port $CUSTOM_SSH_PORT added to Firewalld successfully."
+  else
+    log "Failed to verify custom SSH port $CUSTOM_SSH_PORT in Firewalld."
+  fi
 fi
 
 # ----------------- ClamAV ----------------- #
@@ -439,6 +475,7 @@ else
     log "ERROR: Failed to install ClamAV packages."
   fi
 fi
+
 # ----------------- Maldet ----------------- #
 
 log "Checking Maldet installation..."
@@ -533,52 +570,55 @@ echo
 # Restart SSH service immediately to update any changes
 systemctl restart sshd
 
-# ----------------- SSH Connectivity Test (Custom Port) ----------------- #
-# Make sure ssh client exists (usually already installed)
-if ! command -v ssh >/dev/null 2>&1; then
-  log "ssh client not found — installing openssh-client..."
-  apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
-fi
+# ----------------- SSH Connectivity Test (Custom Port ONLY) ----------------- #
 
-if command -v ssh >/dev/null 2>&1; then
-  echo "================ SSH Connectivity Test (port $CUSTOM_SSH_PORT) ================"
-  
-  # Best-effort guess of primary server IP
-  SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
-    SERVER_IP_GUESS="127.0.0.1"
+if (( CUSTOM_PORT_ENABLED == 1 )) && [[ "$CUSTOM_SSH_PORT" != "22" ]]; then
+  # Make sure ssh client exists (usually already installed)
+  if ! command -v ssh >/dev/null 2>&1; then
+    log "ssh client not found — installing openssh-client..."
+    apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
   fi
 
-  # Prompt for the server IP/hostname to test SSH on the custom port
-  read -r -p "Enter server IP/hostname to test SSH on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
-  SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
+  if command -v ssh >/dev/null 2>&1; then
+    echo "================ SSH Connectivity Test (port $CUSTOM_SSH_PORT) ================"
 
-  echo
-  echo "[INFO] The script will now start a TEST SSH session:"
-  echo "       ssh -p $CUSTOM_SSH_PORT root@${SSH_TEST_HOST}"
-  echo "       Log in with your ROOT password when prompted."
-  echo "       After entering your password, type 'exit' to return to this setup script."
-  read -r -p "Press ENTER to start the SSH test..." _
+    # Best-effort guess of primary server IP
+    SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
+      SERVER_IP_GUESS="127.0.0.1"
+    fi
 
-  # Run SSH test on custom port
-  ssh -p "$CUSTOM_SSH_PORT" "root@${SSH_TEST_HOST}"
-  SSH_TEST_RC=$?
+    read -r -p "Enter server IP/hostname to test SSH on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
+    SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
 
-  if [[ "$SSH_TEST_RC" -eq 0 ]]; then
-    echo "[OK] SSH test session to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT completed successfully."
-    echo "     You should now be safe to reconnect on port $CUSTOM_SSH_PORT after a reboot."
+    echo
+    echo "[INFO] The script will now start a TEST SSH session:"
+    echo "       ssh -p $CUSTOM_SSH_PORT root@${SSH_TEST_HOST}"
+    echo "       Log in with your ROOT password when prompted."
+    echo "       After entering your password, type 'exit' to return to this setup script."
+    read -r -p "Press ENTER to start the SSH test..." _
+
+    ssh -p "$CUSTOM_SSH_PORT" "root@${SSH_TEST_HOST}"
+    SSH_TEST_RC=$?
+
+    if [[ "$SSH_TEST_RC" -eq 0 ]]; then
+      echo "[OK] SSH test session to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT completed successfully."
+      echo "     You should now be safe to reconnect on port $CUSTOM_SSH_PORT after a reboot."
+    else
+      echo "[-] WARNING: SSH test to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT failed or was aborted (exit code: $SSH_TEST_RC)."
+      echo "    Do NOT close your current SSH session until you have fixed SSH/Firewall settings."
+    fi
+
+    echo "=================================================================="
+    echo
   else
-    echo "[-] WARNING: SSH test to root@${SSH_TEST_HOST}:$CUSTOM_SSH_PORT failed or was aborted (exit code: $SSH_TEST_RC)."
-    echo "    Do NOT close your current SSH session until you have fixed SSH/Firewall settings."
+    echo "[-] WARNING: ssh client is not available; skipping SSH connectivity test."
   fi
-
-  echo "=================================================================="
-  echo
 else
-  echo "[-] WARNING: ssh client is not available; skipping SSH connectivity test."
+  echo "=================================================================="
+  echo "[INFO] SSH connectivity test skipped (no custom port configured; using port 22)."
+  echo "=================================================================="
 fi
-
-echo "=================================================================="
 
 # -------------------------------------------------------------
 # Optional: Run external backup module (GitHub-hosted)
