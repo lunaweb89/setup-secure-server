@@ -492,6 +492,8 @@ fi
 
 # ----------------- Maldet ----------------- #
 
+# ----------------- Maldet ----------------- #
+
 log "Checking Maldet installation..."
 
 MALDET_CONF="/usr/local/maldetect/conf.maldet"
@@ -529,12 +531,12 @@ else
   log "WARNING: Maldet config file not found at $MALDET_CONF"
 fi
 
-# Install Linux Malware Detect and its dependencies
-apt-get update
-apt-get install -y inotify-tools  # required for maldet --monitor (inotifywait)
-
-# If you install maldet via package manager, keep that here.
-# If you install via custom script/wget, leave that flow as-is.
+# Ensure dependency for monitor mode (inotifywait) is installed
+if ! command -v inotifywait >/dev/null 2>&1; then
+  log "Installing inotify-tools for Maldet (inotifywait)..."
+  apt-get update
+  apt-get install -y inotify-tools
+fi
 
 # Ensure maldet tmp directory exists (avoids PID file issues)
 install -d -m 755 /usr/local/maldetect/tmp || true
