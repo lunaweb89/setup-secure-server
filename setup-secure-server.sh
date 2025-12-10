@@ -319,13 +319,24 @@ fi
 
 # ----------------- Fail2Ban ----------------- #
 
-FAIL_JAIL="/etc/fail2ban/jail.local"
-mkdir -p /etc/fail2ban
-backup "$FAIL_JAIL"
+log "Ensuring Fail2Ban is installed..."
 
-log "Configuring Fail2Ban..."
+if ! dpkg -s fail2ban >/dev/null 2>&1; then
+  log "Fail2Ban not found; installing fail2ban..."
+  if ! apt_install_retry fail2ban; then
+    log "ERROR: Failed to install Fail2Ban. Skipping Fail2Ban configuration."
+    STEP_fail2ban_config="FAILED"
+  fi
+fi
 
-if cat > "$FAIL_JAIL" <<EOF
+if dpkg -s fail2ban >/dev/null 2>&1; then
+  FAIL_JAIL="/etc/fail2ban/jail.local"
+  mkdir -p /etc/fail2ban
+  backup "$FAIL_JAIL"
+
+  log "Configuring Fail2Ban..."
+
+  cat > "$FAIL_JAIL" <<EOF
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -333,34 +344,93 @@ maxretry = 5
 
 [sshd]
 enabled  = true
-port     = $CUSTOM_SSH_PORT
+port     = $SSH_PORT
 logpath  = %(sshd_log)s
 backend  = systemd
 EOF
-then
+
   systemctl enable fail2ban >/dev/null 2>&1 || true
   systemctl restart fail2ban >/dev/null 2>&1 || true
   STEP_fail2ban_config="OK"
+else
+  log "[WARNING] Fail2Ban is not installed; cannot configure jails."
+  STEP_fail2ban_config="FAILED"
 fi
 
 # ----------------- UFW Firewall ----------------- #
 
-log "Configuring UFW firewall..."
-
+STEP_ufw_firewall="SKIPPED"
 UFW_OK=1
 
-ufw delete allow OpenSSH  >/dev/null 2>&1 || true
-ufw delete limit OpenSSH  >/dev/null 2>&1 || true
-ufw delete allow 22/tcp   >/dev/null 2>&1 || true
-ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+log "Ensuring UFW is installed (if using UFW as firewall)..."
 
-# Ensure custom port is allowed
-ufw allow $CUSTOM_SSH_PORT/tcp        >/dev/null || UFW_OK=0
+if ! command -v ufw >/dev/null 2>&1; then
+  # Try to install UFW; if it fails, we just SKIP UFW config and rely on Firewalld/other
+  log "UFW binary not found; attempting to install ufw..."
+  if ! apt_install_retry ufw; then
+    log "[WARNING] Failed to install UFW. Skipping UFW firewall configuration."
+  fi
+fi
 
-ufw default deny incoming  >/dev/null || UFW_OK=0
-ufw default allow outgoing >/dev/null || UFW_OK=0
+if command -v ufw >/dev/null 2>&1; then
+  log "Configuring UFW firewall for SSH port $SSH_PORT..."
 
-ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+  # Remove any existing OpenSSH / 22 rules so we don't keep old defaults
+  ufw delete allow OpenSSH  >/dev/null 2>&1 || true
+  ufw delete limit OpenSSH  >/dev/null 2>&1 || true
+  ufw delete allow 22/tcp   >/dev/null 2>&1 || true
+  ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+
+  # Allow custom SSH port (current $SSH_PORT)
+  ufw allow "$SSH_PORT/tcp" >/dev/null 2>&1 || UFW_OK=0
+
+  # HTTP/HTTPS
+  ufw allow 80/tcp          >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 443/tcp         >/dev/null 2>&1 || UFW_OK=0
+
+  # App ports
+  ufw allow 8090/tcp        >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 7080/tcp        >/dev/null 2>&1 || UFW_OK=0
+
+  # DNS
+  ufw allow 53/tcp          >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 53/udp          >/dev/null 2>&1 || UFW_OK=0
+  ufw allow out 53/tcp      >/dev/null 2>&1 || UFW_OK=0
+  ufw allow out 53/udp      >/dev/null 2>&1 || UFW_OK=0
+
+  # Email ports
+  ufw allow 25/tcp          >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 465/tcp         >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 587/tcp         >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 110/tcp         >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 995/tcp         >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 143/tcp         >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 993/tcp         >/dev/null 2>&1 || UFW_OK=0
+
+  # FTP
+  ufw allow 21/tcp          >/dev/null 2>&1 || UFW_OK=0
+  ufw allow 40110:40210/tcp >/dev/null 2>&1 || UFW_OK=0
+
+  # Livepatch + Snapd traffic (HTTPS out)
+  ufw allow out 443/tcp     >/dev/null 2>&1 || UFW_OK=0
+
+  ufw default deny incoming  >/dev/null 2>&1 || UFW_OK=0
+  ufw default allow outgoing >/dev/null 2>&1 || UFW_OK=0
+
+  if ufw --force enable >/dev/null 2>&1; then
+    STEP_ufw_firewall="OK"
+  else
+    STEP_ufw_firewall="FAILED"
+    UFW_OK=0
+  fi
+
+  if (( UFW_OK == 0 )); then
+    log "[WARNING] Some UFW rules may have failed to apply. Check 'ufw status verbose'."
+  fi
+else
+  log "UFW is not available; skipping UFW configuration and relying on Firewalld/other firewall."
+  STEP_ufw_firewall="SKIPPED"
+fi
 
 # ----------------- Firewalld Configuration ----------------- #
 
