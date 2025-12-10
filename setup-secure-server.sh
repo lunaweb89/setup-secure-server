@@ -635,4 +635,26 @@ else
   log "Skipping Backup + Storage Box module."
 fi
 
+# ------------------------------------------------------------------
+# Optional: Run performance optimizer (OpenLiteSpeed, MariaDB, Redis)
+# ------------------------------------------------------------------
+echo
+echo "============================================================"
+echo " Optional: Run Luna Performance Optimizer now?"
+echo "   - Tunes sysctl, limits, OpenLiteSpeed, PHP LSAPI"
+echo "   - Tunes MariaDB (60% RAM) and Redis (15% RAM, max 2GB)"
+echo "   - Auto-detects CPU/RAM and adjusts values dynamically"
+echo "============================================================"
+read -r -p "Run server-optimizer.sh now? (y/N): " run_opt
+
+if [[ "$run_opt" =~ ^[Yy]$ ]]; then
+  echo "[+] Downloading and running server-optimizer.sh ..."
+  bash <(curl -fsSL "https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/server-optimizer.sh") || {
+    echo "[!] server-optimizer.sh failed. Please review the output above."
+  }
+else
+  echo "[+] Skipping performance optimizer. You can run it later with:"
+  echo "    bash <(curl -fsSL \"https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/server-optimizer.sh\")"
+fi
+
 exit 0
