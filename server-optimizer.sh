@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# server-optimizer.sh
+# server-optimizer.sh (v2)
 #
 # Auto-Optimization Script for:
 #   - Ubuntu 20.04 / 22.04 / 24.04
@@ -15,14 +15,14 @@
 #   - Redis = 15% RAM (capped at 2GB)
 #   - Leaves ~25% RAM for OS + PHP + OLS spikes
 #
-# Fully automatic — only prompts if something is unsafe or would break.
+# Fully automatic — only warns on unsafe conditions, does not crash the server.
 #
 
 set -euo pipefail
 
-log() { echo -e "[+] $*"; }
+log()  { echo -e "[+] $*"; }
 warn() { echo -e "[-] $*"; }
-err() { echo -e "[ERROR] $*" >&2; }
+err()  { echo -e "[ERROR] $*" >&2; }
 
 timestamp="$(date +%Y%m%d-%H%M%S)"
 
@@ -61,7 +61,7 @@ RESERVED_MB=$(( TOTAL_RAM_MB - MARIADB_MB - REDIS_MB ))
 
 log "MariaDB Allocation: ${MARIADB_MB} MB"
 log "Redis Allocation: ${REDIS_MB} MB"
-log "Reserved for OS spikes: ${RESERVED_MB} MB"
+log "Reserved for OS/spikes: ${RESERVED_MB} MB"
 
 ###############################################
 # 3. SAFETY CHECK — DISK SPACE
@@ -102,7 +102,7 @@ vm.swappiness = 10
 vm.vfs_cache_pressure = 50
 EOF
 
-sysctl --system >/dev/null
+sysctl --system >/dev/null || warn "sysctl --system reported warnings (often safe on some kernels)."
 
 ###############################################
 # 5. LIMITS CONFIGURATION
@@ -128,31 +128,64 @@ OLS_CONF="/usr/local/lsws/conf/httpd_config.conf"
 if [[ -f "$OLS_CONF" ]]; then
     cp "$OLS_CONF" "$OLS_CONF.bak-$timestamp"
 
-    sed -i "s/^maxConnections.*/maxConnections                $((CPU_CORES * 4000))/" "$OLS_CONF"
-    sed -i "s/^maxSSLConnections.*/maxSSLConnections          $((CPU_CORES * 1000))/" "$OLS_CONF"
-    sed -i "s/^adminReqPerSec.*/adminReqPerSec                2000/" "$OLS_CONF"
+    MAX_CONN=$((CPU_CORES * 4000))
+    MAX_SSL=$((CPU_CORES * 1000))
+
+    # maxConnections (handle indentation and also your 'maxConnections <value>' line)
+    if grep -Eq "^[[:space:]]*maxConnections" "$OLS_CONF"; then
+        sed -i -E "s/^[[:space:]]*maxConnections.*/    maxConnections               ${MAX_CONN}/" "$OLS_CONF"
+    else
+        echo "    maxConnections               ${MAX_CONN}" >>"$OLS_CONF"
+    fi
+
+    # maxSSLConnections
+    if grep -Eq "^[[:space:]]*maxSSLConnections" "$OLS_CONF"; then
+        sed -i -E "s/^[[:space:]]*maxSSLConnections.*/    maxSSLConnections          ${MAX_SSL}/" "$OLS_CONF"
+    else
+        echo "    maxSSLConnections          ${MAX_SSL}" >>"$OLS_CONF"
+    fi
+
 else
-    warn "OpenLiteSpeed config not found. Skipping."
+    warn "OpenLiteSpeed config not found at $OLS_CONF. Skipping OLS tuning."
 fi
 
 ###############################################
-# 7. PHP LSAPI OPTIMIZATION FOR ALL VERSIONS
+# 7. PHP LSAPI OPTIMIZATION (AUTO-DETECT)
 ###############################################
 
-log "Optimizing all installed PHP LSAPI versions..."
+log "Optimizing all detected PHP LSAPI php.ini files..."
 
-for PHPINI in /usr/local/lsws/lsphp*/etc/php.ini; do
+mapfile -t PHPINIS < <(find /usr/local/lsws -type f -name php.ini 2>/dev/null || true)
+
+if ((${#PHPINIS[@]} == 0)); then
+  warn "No php.ini found under /usr/local/lsws; skipping PHP LSAPI tuning."
+else
+  for PHPINI in "${PHPINIS[@]}"; do
     [[ -f "$PHPINI" ]] || continue
 
     cp "$PHPINI" "$PHPINI.bak-$timestamp"
 
-    sed -i "s/^memory_limit.*/memory_limit = 512M/" "$PHPINI"
-    sed -i "s/^max_execution_time.*/max_execution_time = 300/" "$PHPINI"
+    # memory_limit and max_execution_time
+    if grep -Eq "^memory_limit" "$PHPINI"; then
+      sed -i "s/^memory_limit.*/memory_limit = 512M/" "$PHPINI"
+    else
+      echo "memory_limit = 512M" >>"$PHPINI"
+    fi
 
-    # LSAPI children = CPU * 10 (balanced)
-    sed -i "s/^;*lsapi_children.*/lsapi_children = $((CPU_CORES * 10))/" "$PHPINI"
+    if grep -Eq "^max_execution_time" "$PHPINI"; then
+      sed -i "s/^max_execution_time.*/max_execution_time = 300/" "$PHPINI"
+    else
+      echo "max_execution_time = 300" >>"$PHPINI"
+    fi
 
-done
+    # lsapi_children = CPU * 10
+    if grep -iEq "lsapi_children" "$PHPINI"; then
+      sed -i -E "s/^[[:space:];]*lsapi_children.*/lsapi_children = $((CPU_CORES * 10))/" "$PHPINI"
+    else
+      echo "lsapi_children = $((CPU_CORES * 10))" >>"$PHPINI"
+    fi
+  done
+fi
 
 ###############################################
 # 8. REDIS OPTIMIZATION
@@ -161,10 +194,26 @@ done
 log "Optimizing Redis..."
 
 REDIS_CONF="/etc/redis/redis.conf"
-cp "$REDIS_CONF" "$REDIS_CONF.bak-$timestamp"
 
-sed -i "s/^maxmemory .*/maxmemory ${REDIS_MB}mb/" "$REDIS_CONF"
-sed -i "s/^# maxmemory-policy.*/maxmemory-policy allkeys-lru/" "$REDIS_CONF"
+if [[ -f "$REDIS_CONF" ]]; then
+  cp "$REDIS_CONF" "$REDIS_CONF.bak-$timestamp"
+
+  # maxmemory
+  if grep -Eq "^[[:space:]]*maxmemory[[:space:]]" "$REDIS_CONF"; then
+    sed -i -E "s/^[[:space:]]*maxmemory[[:space:]].*/maxmemory ${REDIS_MB}mb/" "$REDIS_CONF"
+  else
+    printf "\nmaxmemory %smb\n" "${REDIS_MB}" >>"$REDIS_CONF"
+  fi
+
+  # maxmemory-policy
+  if grep -Eq "^[[:space:]]*maxmemory-policy" "$REDIS_CONF"; then
+    sed -i -E "s/^[[:space:]]*maxmemory-policy.*/maxmemory-policy allkeys-lru/" "$REDIS_CONF"
+  else
+    printf "maxmemory-policy allkeys-lru\n" >>"$REDIS_CONF"
+  fi
+else
+  warn "Redis config not found at $REDIS_CONF; skipping Redis tuning."
+fi
 
 ###############################################
 # 9. MARIADB OPTIMIZATION
@@ -203,26 +252,42 @@ EOF
 log "Validating configurations..."
 
 if ! mysqld --verbose --help >/dev/null 2>&1; then
-    err "MariaDB config test failed. Restore backup:"
+    err "MariaDB config test failed. To restore previous config, run:"
     echo "cp $MARIADB_CONF.bak-$timestamp $MARIADB_CONF"
     exit 1
 fi
 
-redis-server --test-memory 64 >/dev/null 2>&1 || warn "Redis memory test warning."
+# Light Redis sanity check (does not read redis.conf, just memory self-test)
+redis-server --test-memory 64 >/dev/null 2>&1 || warn "Redis memory self-test reported a warning."
 
 ###############################################
 # 11. RESTART SERVICES
 ###############################################
 
 log "Restarting Redis..."
-systemctl restart redis-server || err "Redis restart failed!"
+if systemctl restart redis-server; then
+  :
+else
+  err "Redis restart failed! Please check: journalctl -u redis-server"
+fi
 
 log "Restarting MariaDB..."
-systemctl restart mariadb || err "MariaDB restart failed!"
+if systemctl restart mariadb; then
+  :
+else
+  err "MariaDB restart failed! Please check: journalctl -u mariadb"
+fi
 
-if systemctl status lsws >/dev/null 2>&1; then
-    log "Restarting OpenLiteSpeed..."
-    systemctl restart lsws || err "OLS restart failed!"
+if systemctl status lsws >/dev/null 2>&1 || systemctl status lshttpd >/dev/null 2>&1; then
+  log "Restarting OpenLiteSpeed..."
+  # service name is lshttpd on CyberPanel systems
+  if systemctl restart lshttpd 2>/dev/null || systemctl restart lsws 2>/dev/null; then
+    :
+  else
+    err "OpenLiteSpeed restart failed! Please check: journalctl -u lshttpd"
+  fi
+else
+  warn "OpenLiteSpeed service not detected; skipping restart."
 fi
 
 ###############################################
@@ -238,19 +303,28 @@ echo "MariaDB: ${MARIADB_MB} MB"
 echo "Redis: ${REDIS_MB} MB"
 echo "Reserved: ${RESERVED_MB} MB"
 echo
+
 echo "MariaDB threads_running:"
 mysql -uroot -e "SHOW GLOBAL STATUS LIKE 'Threads_running';" 2>/dev/null || true
 echo
+
 echo "Redis usage:"
 redis-cli info memory | egrep "used_memory_human|maxmemory_human|mem_fragmentation_ratio" || true
 echo
+
 echo "OpenLiteSpeed status:"
-systemctl status lsws --no-pager 2>/dev/null | head -n 5 || true
+if systemctl status lshttpd >/dev/null 2>&1; then
+  systemctl status lshttpd --no-pager 2>/dev/null | head -n 8 || true
+elif systemctl status lsws >/dev/null 2>&1; then
+  systemctl status lsws --no-pager 2>/dev/null | head -n 8 || true
+else
+  echo "OpenLiteSpeed service not detected."
+fi
 echo
+
 echo "System failed services:"
 systemctl --failed || true
 
-log "Server optimization finished successfully."
-
 touch /root/.server_optimizer_last_run 2>/dev/null || true
 
+log "Server optimization finished successfully."
