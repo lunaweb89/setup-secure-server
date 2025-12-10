@@ -11,13 +11,14 @@
 #   - Harden SSH config (move SSH to custom port, root+password allowed)
 #   - Install & configure Fail2Ban
 #   - Configure & enable UFW firewall (SSH ONLY on custom port, not 22)
+#   - Optionally configure firewalld (Dedicated server only)
 #   - Install ClamAV + Maldet
 #   - Create weekly malware scan cron job
 #
 # Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
 
-set -u   # strict on unset vars
+set -u
 set -o pipefail
 
 # ----------------- Step Status ----------------- #
@@ -26,19 +27,12 @@ STEP_livepatch="SKIPPED"
 STEP_auto_security_updates="FAILED"
 STEP_ssh_hardening="FAILED"
 STEP_fail2ban_config="FAILED"
-STEP_ufw_firewall="FAILED"
+STEP_ufw_firewall="SKIPPED"
+STEP_firewalld_config="SKIPPED"
 STEP_clamav_install="FAILED"
 STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
-
-# ----------------- Custom Port Configuration ----------------- #
-# Prompt the user to enter the custom SSH port before applying hardening
-read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " CUSTOM_SSH_PORT
-
-# Use port 22 as the default if the user presses enter without typing anything
-CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
-LOGGED_PORT="Custom port"  # Masked output for SSH port
 
 # ----------------- Helpers ----------------- #
 
@@ -83,7 +77,8 @@ apt_update_retry() {
 }
 
 apt_install_retry() {
-  local tries=0 max_tries=3 pkgs=("$@")
+  local tries=0 max_tries=3
+  local pkgs=("$@")
   while (( tries < max_tries )); do
     if apt-get install -y -qq "${pkgs[@]}"; then return 0; fi
     log "apt-get install ${pkgs[*]} failed — running apt-get -f install..."
@@ -99,7 +94,44 @@ apt_install_retry() {
 require_root
 export DEBIAN_FRONTEND=noninteractive
 
+# ----------------- Server Type (VPS vs Dedicated) ----------------- #
+
+SERVER_ENV=""
+while [[ "$SERVER_ENV" != "vps" && "$SERVER_ENV" != "dedicated" ]]; do
+  read -r -p "Is this a VPS or Dedicated server? [v/d]: " _ans
+  _ans="${_ans,,}"
+  case "$_ans" in
+    v) SERVER_ENV="vps" ;;
+    d) SERVER_ENV="dedicated" ;;
+    *) echo "Please enter 'v' for VPS or 'd' for Dedicated.";;
+  esac
+done
+log "Server environment selected: $SERVER_ENV"
+
+# ----------------- Custom SSH Port Configuration ----------------- #
+
+CUSTOM_SSH_PORT=""
+while :; do
+  read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " CUSTOM_SSH_PORT
+  CUSTOM_SSH_PORT="${CUSTOM_SSH_PORT:-22}"
+
+  if [[ "$CUSTOM_SSH_PORT" =~ ^[0-9]+$ ]] && (( CUSTOM_SSH_PORT >= 1 && CUSTOM_SSH_PORT <= 65535 )); then
+    break
+  else
+    echo "[-] Invalid port '$CUSTOM_SSH_PORT'. Please enter a number between 1 and 65535."
+  fi
+done
+
+log "Using SSH port: $CUSTOM_SSH_PORT"
+LOGGED_PORT="Custom port"  # Masked output if needed
+FIREWALL_NEEDED=1
+if [[ "$CUSTOM_SSH_PORT" == "22" ]]; then
+  FIREWALL_NEEDED=0
+  log "Default SSH port 22 selected — will SKIP UFW & firewalld configuration as requested."
+fi
+
 # ----------------- Ubuntu Pro / Livepatch (Optional) ----------------- #
+
 echo "============================================================"
 echo " Ubuntu Pro Livepatch Setup (Optional)"
 echo "============================================================"
@@ -113,7 +145,6 @@ echo
 if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   log "Setting up Ubuntu Pro + Livepatch..."
 
-  # Ensure 'pro' CLI is available
   if ! command -v pro >/dev/null 2>&1; then
     log "ubuntu-advantage-tools (pro CLI) missing — installing..."
     if ! apt_install_retry ubuntu-advantage-tools; then
@@ -123,7 +154,6 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
   fi
 
   if [[ -n "$UBUNTU_PRO_TOKEN" ]] && command -v pro >/dev/null 2>&1; then
-    # Attach if needed (pro status exits 0 even when not attached, so check text)
     if pro status 2>&1 | grep -qi "not attached"; then
       log "Machine is NOT attached to Ubuntu Pro — attaching now..."
       if pro attach "$UBUNTU_PRO_TOKEN"; then
@@ -135,12 +165,10 @@ if [[ -n "$UBUNTU_PRO_TOKEN" ]]; then
       log "Ubuntu Pro already attached; skipping 'pro attach'."
     fi
 
-    # Helper: check if Livepatch is reported enabled
     is_livepatch_enabled() {
       pro status 2>/dev/null | awk '/livepatch/ {print tolower($0)}' | grep -q 'enabled'
     }
 
-    # If already enabled, don't even try to enable again
     if is_livepatch_enabled; then
       log "Livepatch already enabled via Ubuntu Pro."
       STEP_livepatch="OK"
@@ -182,9 +210,7 @@ BASE_PKGS=(lsb-release ca-certificates openssh-server cron ufw fail2ban unattend
 NEED_INSTALL=()
 
 for pkg in "${BASE_PKGS[@]}"; do
-  if dpkg -s "$pkg" >/dev/null 2>&1; then
-    continue
-  else
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
     NEED_INSTALL+=("$pkg")
   fi
 done
@@ -244,7 +270,6 @@ APT::Periodic::Update-Package-Lists "7";
 APT::Periodic::Unattended-Upgrade "7";
 EOF
 
-  # Monthly updates on 1st at 13:30 (cron in system time)
   cat > "$CRON_UPDATES" <<'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -260,22 +285,14 @@ EOF
 SSH_HARDEN="/etc/ssh/sshd_config.d/99-hardening.conf"
 mkdir -p /etc/ssh/sshd_config.d
 backup "$SSH_HARDEN"
+backup "/etc/ssh/sshd_config"
 
 log "Applying SSH hardening (SSH on $CUSTOM_SSH_PORT only, root+password allowed)..."
 
-# Overwrite the existing Port line with the custom port if it exists in sshd_config
-if grep -q "^Port" /etc/ssh/sshd_config; then
-  # Replace the existing Port line with the custom port
-  sed -i "s/^Port.*/Port $CUSTOM_SSH_PORT/" /etc/ssh/sshd_config
-else
-  # If no Port line exists, add the custom port at the end
-  echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
-fi
+# Remove any existing Port lines to avoid duplicates
+sed -i '/^Port[[:space:]]\+/d' /etc/ssh/sshd_config
+echo "Port $CUSTOM_SSH_PORT" >> /etc/ssh/sshd_config
 
-# Restart SSH service immediately to apply changes
-sudo systemctl restart sshd
-
-# Create or update SSH hardening file
 SSH_CONFIG_OK=0
 if cat > "$SSH_HARDEN" <<EOF
 # SSH Hardening
@@ -295,25 +312,24 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 EOF
 then
-  # Test the SSH configuration
   if sshd -t 2>/dev/null; then
-    log "SSH configuration syntax OK. Reload will be done AFTER firewall check."
+    log "SSH configuration syntax OK."
     SSH_CONFIG_OK=1
   else
-    log "ERROR: SSH config test failed. Not reloading sshd."
+    log "ERROR: SSH config test failed. Not restarting sshd."
   fi
 fi
 
-# Reload SSH service to apply changes if SSH config is OK
 if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
-  log "Reloading SSH service to apply custom port..."
   systemctl restart sshd
-
-  # Check if the SSH service is listening on the custom port
-  ss -tuln | grep "$CUSTOM_SSH_PORT" && log "SSH is now listening on port $CUSTOM_SSH_PORT"
-  STEP_ssh_hardening="OK"
+  if ss -tuln | grep -q ":$CUSTOM_SSH_PORT"; then
+    log "SSH is now listening on port $CUSTOM_SSH_PORT"
+    STEP_ssh_hardening="OK"
+  else
+    log "WARNING: sshd restarted but port $CUSTOM_SSH_PORT does not appear in ss output."
+    STEP_ssh_hardening="FAILED"
+  fi
 else
-  log "SSH hardening failed, configuration not reloaded."
   STEP_ssh_hardening="FAILED"
 fi
 
@@ -363,118 +379,105 @@ fi
 
 # ----------------- UFW Firewall ----------------- #
 
-log "Ensuring UFW is installed (if using UFW as firewall)..."
+if (( FIREWALL_NEEDED == 0 )); then
+  log "SSH port is 22 — skipping UFW configuration entirely."
+  STEP_ufw_firewall="SKIPPED"
+else
+  log "Ensuring UFW is installed (primary firewall)..."
 
-STEP_ufw_firewall="SKIPPED"
-UFW_OK=1
-
-if ! command -v ufw >/dev/null 2>&1; then
-  log "UFW binary not found; attempting to install ufw..."
-  if ! apt_install_retry ufw; then
-    log "[WARNING] Failed to install UFW. Skipping UFW firewall configuration."
-  fi
-fi
-
-if command -v ufw >/dev/null 2>&1; then
-  log "Configuring UFW firewall..."
+  STEP_ufw_firewall="SKIPPED"
   UFW_OK=1
 
-  ufw delete allow OpenSSH  >/dev/null 2>&1 || true
-  ufw delete limit OpenSSH  >/dev/null 2>&1 || true
-  ufw delete allow 22/tcp   >/dev/null 2>&1 || true
-  ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+  if ! command -v ufw >/dev/null 2>&1; then
+    log "UFW binary not found; attempting to install ufw..."
+    if ! apt_install_retry ufw; then
+      log "[WARNING] Failed to install UFW. Skipping UFW firewall configuration."
+    fi
+  fi
 
-  # Ensure custom port is allowed
-  ufw allow "$CUSTOM_SSH_PORT"/tcp        >/dev/null 2>&1 || UFW_OK=0
+  if command -v ufw >/dev/null 2>&1; then
+    log "Configuring UFW firewall (SSH only on $CUSTOM_SSH_PORT)..."
 
-  ufw default deny incoming  >/dev/null 2>&1 || UFW_OK=0
-  ufw default allow outgoing >/dev/null 2>&1 || UFW_OK=0
+    ufw --force reset >/dev/null 2>&1 || true
 
-  if ufw --force enable >/dev/null 2>&1; then
-    STEP_ufw_firewall="OK"
+    ufw allow "${CUSTOM_SSH_PORT}/tcp" >/dev/null 2>&1 || UFW_OK=0
+
+    ufw default deny incoming  >/dev/null 2>&1 || UFW_OK=0
+    ufw default allow outgoing >/dev/null 2>&1 || UFW_OK=0
+
+    if ufw --force enable >/dev/null 2>&1; then
+      STEP_ufw_firewall="OK"
+    else
+      STEP_ufw_firewall="FAILED"
+      UFW_OK=0
+    fi
+
+    if (( UFW_OK == 0 )); then
+      log "[WARNING] Some UFW rules may have failed to apply. Check 'ufw status verbose'."
+    fi
   else
-    STEP_ufw_firewall="FAILED"
-    UFW_OK=0
+    log "UFW is not available; skipping UFW configuration."
+    STEP_ufw_firewall="SKIPPED"
   fi
-
-  if (( UFW_OK == 0 )); then
-    log "[WARNING] Some UFW rules may have failed to apply. Check 'ufw status verbose'."
-  fi
-else
-  log "UFW is not available; skipping UFW configuration."
-  STEP_ufw_firewall="SKIPPED"
 fi
 
-# ----------------- Firewalld Configuration (dedicated only) ----------------- #
+# ----------------- Firewalld Configuration ----------------- #
 
-# Only touch firewalld if:
-#  - firewall-cmd exists, AND
-#  - we are NOT in a virtualized environment (likely dedicated server)
-if ! command -v firewall-cmd >/dev/null 2>&1; then
-  log "firewalld not installed; skipping Firewalld configuration."
+if (( FIREWALL_NEEDED == 0 )); then
+  log "SSH port 22 selected — skipping firewalld configuration entirely."
+  STEP_firewalld_config="SKIPPED"
 else
-  # Detect virtualization (VPS, cloud, etc.)
-  VIRT_TYPE="$(systemd-detect-virt || true)"
-  if [[ -n "$VIRT_TYPE" && "$VIRT_TYPE" != "none" ]]; then
-    log "Virtualized environment detected ($VIRT_TYPE) — skipping Firewalld, using UFW only."
+  if [[ "$SERVER_ENV" == "vps" ]]; then
+    # On VPS, do NOT touch firewalld (no install, no disable) unless you explicitly want that.
+    log "VPS environment with custom port — using UFW only, skipping firewalld."
+    STEP_firewalld_config="SKIPPED"
   else
-    log "Configuring Firewalld on (likely) dedicated server..."
+    # Dedicated server: configure firewalld if available (or install then configure)
+    if ! command -v firewall-cmd >/dev/null 2>&1; then
+      log "Dedicated server selected but firewalld not found; attempting to install firewalld..."
+      if ! apt_install_retry firewalld; then
+        log "WARNING: Failed to install firewalld. Continuing with UFW only."
+        STEP_firewalld_config="FAILED"
+      fi
+    fi
 
-    FIREWALLD_SERVICE="/etc/firewalld/services/SSHCustom.xml"
-    FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      log "Configuring firewalld on dedicated server..."
 
-    mkdir -p "/etc/firewalld/services" "/etc/firewalld/zones"
+      if ! firewall-cmd --state >/dev/null 2>&1; then
+        systemctl enable firewalld >/dev/null 2>&1 || true
+        systemctl start firewalld  >/dev/null 2>&1 || true
+      fi
 
-    # Backup existing files if they exist
-    backup "$FIREWALLD_SERVICE"
-    backup "$FIREWALLD_ZONE"
-
-    # (Re)create SSHCustom.xml for the custom SSH port
-    cat > "$FIREWALLD_SERVICE" <<EOF
+      # Create sshcustom service if needed
+      if [[ ! -f /etc/firewalld/services/sshcustom.xml ]]; then
+        mkdir -p /etc/firewalld/services
+        cat > /etc/firewalld/services/sshcustom.xml <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
-  <short>SSHCustom</short>
+  <short>sshcustom</short>
   <description>Custom SSH port</description>
   <port port="$CUSTOM_SSH_PORT" protocol="tcp"/>
 </service>
 EOF
+        log "Created firewalld service 'sshcustom' with port $CUSTOM_SSH_PORT."
+        firewall-cmd --reload >/dev/null 2>&1 || true
+      else
+        sed -i 's/port="[^"]*"/port="'"$CUSTOM_SSH_PORT"'"/' /etc/firewalld/services/sshcustom.xml
+        log "Updated firewalld service 'sshcustom' to port $CUSTOM_SSH_PORT."
+        firewall-cmd --reload >/dev/null 2>&1 || true
+      fi
 
-    # If zone file does not exist, create a minimal public zone
-    if [[ ! -f "$FIREWALLD_ZONE" ]]; then
-      cat > "$FIREWALLD_ZONE" <<EOF
-<?xml version="1.0" encoding="utf-8"?>
-<zone>
-  <short>public</short>
-  <description>Public Zone</description>
-</zone>
-EOF
-      log "Created minimal Firewalld public zone config."
-    fi
+      firewall-cmd --permanent --zone=public --remove-service=ssh >/dev/null 2>&1 || true
+      firewall-cmd --permanent --zone=public --add-service=sshcustom >/dev/null 2>&1 || true
 
-    # Make sure the custom port is present in the public zone file
-    if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
-      sed -i "/<\/zone>/i \
-  <rule family=\"ipv4\">\n\
-    <source address=\"0.0.0.0/0\"/>\n\
-    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
-    <accept/>\n\
-  </rule>\n\
-  <rule family=\"ipv6\">\n\
-    <source address=\"::/0\"/>\n\
-    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
-    <accept/>\n\
-  </rule>" "$FIREWALLD_ZONE"
-      log "Custom port $CUSTOM_SSH_PORT rules injected into Firewalld public zone."
-    else
-      log "Custom port $CUSTOM_SSH_PORT already present in Firewalld public zone."
-    fi
-
-    # Apply changes
-    if firewall-cmd --reload; then
-      log "Firewalld reloaded successfully."
-      STEP_ufw_firewall="${STEP_ufw_firewall:-OK}"  # don't mark fail just because of Firewalld
-    else
-      log "WARNING: firewall-cmd --reload failed. Check Firewalld configuration."
+      if firewall-cmd --reload >/dev/null 2>&1; then
+        log "firewalld reloaded successfully with sshcustom on port $CUSTOM_SSH_PORT."
+        STEP_firewalld_config="OK"
+      else
+        log "WARNING: firewall-cmd --reload failed. Check firewalld configuration."
+        STEP_firewalld_config="FAILED"
+      fi
     fi
   fi
 fi
@@ -533,7 +536,6 @@ else
   fi
 fi
 
-# Configure Maldet if config exists (whether newly installed or already present)
 if [[ -f "$MALDET_CONF" ]]; then
   sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF"
   sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF"
@@ -584,6 +586,7 @@ printf "auto_security_updates          : %s\n" "$STEP_auto_security_updates"
 printf "ssh_hardening                  : %s\n" "$STEP_ssh_hardening"
 printf "fail2ban_config                : %s\n" "$STEP_fail2ban_config"
 printf "ufw_firewall                   : %s\n" "$STEP_ufw_firewall"
+printf "firewalld_config               : %s\n" "$STEP_firewalld_config"
 printf "clamav_install                 : %s\n" "$STEP_clamav_install"
 printf "maldet_install                 : %s\n" "$STEP_maldet_install"
 printf "weekly_malware_cron            : %s\n" "$STEP_weekly_malware_cron"
@@ -594,11 +597,10 @@ echo " - /var/log/auto-security-updates.log"
 echo " - /var/log/weekly-malware-scan.log"
 echo
 
-# Restart SSH service immediately to update any changes
+# ----------------- SSH Connectivity Test (Custom Port) ----------------- #
+
 systemctl restart sshd
 
-# ----------------- SSH Connectivity Test (Custom Port) ----------------- #
-# Make sure ssh client exists (usually already installed)
 if ! command -v ssh >/dev/null 2>&1; then
   log "ssh client not found — installing openssh-client..."
   apt_install_retry openssh-client || log "WARNING: Failed to install openssh-client; SSH test may not run."
@@ -607,13 +609,11 @@ fi
 if command -v ssh >/dev/null 2>&1; then
   echo "================ SSH Connectivity Test (port $CUSTOM_SSH_PORT) ================"
 
-  # Best-effort guess of primary server IP
   SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
   if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
     SERVER_IP_GUESS="127.0.0.1"
   fi
 
-  # Prompt for the server IP/hostname to test SSH on the custom port
   read -r -p "Enter server IP/hostname to test SSH on port $CUSTOM_SSH_PORT [${SERVER_IP_GUESS}]: " SSH_TEST_HOST
   SSH_TEST_HOST="${SSH_TEST_HOST:-$SERVER_IP_GUESS}"
 
@@ -624,7 +624,6 @@ if command -v ssh >/dev/null 2>&1; then
   echo "       After entering your password, type 'exit' to return to this setup script."
   read -r -p "Press ENTER to start the SSH test..." _
 
-  # Run SSH test on custom port
   ssh -p "$CUSTOM_SSH_PORT" "root@${SSH_TEST_HOST}"
   SSH_TEST_RC=$?
 
