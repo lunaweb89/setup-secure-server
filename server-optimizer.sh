@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# server-optimizer.sh (v2)
+# server-optimizer.sh (v3)
 #
 # Auto-Optimization Script for:
 #   - Ubuntu 20.04 / 22.04 / 24.04
@@ -102,7 +102,10 @@ vm.swappiness = 10
 vm.vfs_cache_pressure = 50
 EOF
 
-sysctl --system >/dev/null || warn "sysctl --system reported warnings (often safe on some kernels)."
+# Apply sysctl; suppress known harmless warnings for legacy keys that some kernels don't support
+if ! sysctl --system 2> >(grep -v "accept_source_route" | grep -v "promote_secondaries" >&2) >/dev/null; then
+  warn "sysctl --system reported warnings (non-fatal; often from other sysctl files)."
+fi
 
 ###############################################
 # 5. LIMITS CONFIGURATION
@@ -131,7 +134,7 @@ if [[ -f "$OLS_CONF" ]]; then
     MAX_CONN=$((CPU_CORES * 4000))
     MAX_SSL=$((CPU_CORES * 1000))
 
-    # maxConnections (handle indentation and also your 'maxConnections <value>' line)
+    # maxConnections (handle indentation and any stray lines)
     if grep -Eq "^[[:space:]]*maxConnections" "$OLS_CONF"; then
         sed -i -E "s/^[[:space:]]*maxConnections.*/    maxConnections               ${MAX_CONN}/" "$OLS_CONF"
     else
@@ -278,7 +281,7 @@ else
   err "MariaDB restart failed! Please check: journalctl -u mariadb"
 fi
 
-if systemctl status lsws >/dev/null 2>&1 || systemctl status lshttpd >/dev/null 2>&1; then
+if systemctl status lshttpd >/dev/null 2>&1 || systemctl status lsws >/dev/null 2>&1; then
   log "Restarting OpenLiteSpeed..."
   # service name is lshttpd on CyberPanel systems
   if systemctl restart lshttpd 2>/dev/null || systemctl restart lsws 2>/dev/null; then
@@ -322,8 +325,9 @@ else
 fi
 echo
 
-echo "System failed services:"
+echo "System failed services (informational; may pre-exist and are NOT changed by this script):"
 systemctl --failed || true
+echo
 
 touch /root/.server_optimizer_last_run 2>/dev/null || true
 
