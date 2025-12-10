@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# server-optimizer.sh (v3)
+# server-optimizer.sh (v4)
 #
 # Auto-Optimization Script for:
 #   - Ubuntu 20.04 / 22.04 / 24.04
@@ -79,7 +79,7 @@ if (( DISK_PCT > 85 )); then
 fi
 
 ###############################################
-# 4. SYSCTL OPTIMIZATION
+# 4. SYSCTL OPTIMIZATION (ONLY OUR FILE)
 ###############################################
 
 log "Applying sysctl tuning..."
@@ -102,9 +102,11 @@ vm.swappiness = 10
 vm.vfs_cache_pressure = 50
 EOF
 
-# Apply sysctl; suppress known harmless warnings for legacy keys that some kernels don't support
-if ! sysctl --system 2> >(grep -v "accept_source_route" | grep -v "promote_secondaries" >&2) >/dev/null; then
-  warn "sysctl --system reported warnings (non-fatal; often from other sysctl files)."
+# Apply only our sysctl snippet to avoid unrelated legacy keys from other files.
+if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
+  log "sysctl settings from $SYSCTL_FILE applied."
+else
+  warn "Failed to apply sysctl settings from $SYSCTL_FILE; please check syntax manually."
 fi
 
 ###############################################
