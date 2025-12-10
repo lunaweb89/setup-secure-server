@@ -529,6 +529,22 @@ else
   log "WARNING: Maldet config file not found at $MALDET_CONF"
 fi
 
+# Install Linux Malware Detect and its dependencies
+apt-get update
+apt-get install -y inotify-tools  # required for maldet --monitor (inotifywait)
+
+# If you install maldet via package manager, keep that here.
+# If you install via custom script/wget, leave that flow as-is.
+
+# Ensure maldet tmp directory exists (avoids PID file issues)
+install -d -m 755 /usr/local/maldetect/tmp || true
+
+# Enable and start maldet monitoring service (ignore failure on systems without maldet)
+if systemctl list-unit-files | grep -q '^maldet\.service'; then
+  systemctl enable maldet.service || true
+  systemctl restart maldet.service || true
+fi
+
 # ----------------- Weekly Malware Scan ----------------- #
 
 CRON_MALWARE="/etc/cron.d/weekly-malware-scan"
