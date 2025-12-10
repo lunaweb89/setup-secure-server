@@ -32,6 +32,23 @@ STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
 
+# ----------------- Custom SSH Port Setup ----------------- #
+
+SSH_PORT=""
+
+while :; do
+  read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " SSH_PORT
+  SSH_PORT="${SSH_PORT:-22}"
+
+  if [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 1 && SSH_PORT <= 65535 )); then
+    break
+  else
+    echo "[-] Invalid port '$SSH_PORT'. Please enter a number between 1 and 65535."
+  fi
+done
+
+log "Using SSH port: $SSH_PORT"
+
 # ----------------- Custom Port Configuration ----------------- #
 # Prompt the user to enter the custom SSH port before applying hardening
 read -r -p "Enter custom SSH port (e.g., 2228) [Default:22]: " CUSTOM_SSH_PORT
@@ -334,7 +351,10 @@ if dpkg -s fail2ban >/dev/null 2>&1; then
   mkdir -p /etc/fail2ban
   backup "$FAIL_JAIL"
 
-  log "Configuring Fail2Ban..."
+  # Defensive: fall back to 22 if SSH_PORT is somehow unset
+  F2B_PORT="${SSH_PORT:-22}"
+
+  log "Configuring Fail2Ban (SSH port $F2B_PORT)..."
 
   cat > "$FAIL_JAIL" <<EOF
 [DEFAULT]
@@ -344,7 +364,7 @@ maxretry = 5
 
 [sshd]
 enabled  = true
-port     = $SSH_PORT
+port     = $F2B_PORT
 logpath  = %(sshd_log)s
 backend  = systemd
 EOF
@@ -357,7 +377,7 @@ else
   STEP_fail2ban_config="FAILED"
 fi
 
-# ----------------- UFW Firewall ----------------- #
+# ----------------- UFW Firewall (if present) ----------------- #
 
 STEP_ufw_firewall="SKIPPED"
 UFW_OK=1
@@ -365,7 +385,6 @@ UFW_OK=1
 log "Ensuring UFW is installed (if using UFW as firewall)..."
 
 if ! command -v ufw >/dev/null 2>&1; then
-  # Try to install UFW; if it fails, we just SKIP UFW config and rely on Firewalld/other
   log "UFW binary not found; attempting to install ufw..."
   if ! apt_install_retry ufw; then
     log "[WARNING] Failed to install UFW. Skipping UFW firewall configuration."
@@ -373,7 +392,9 @@ if ! command -v ufw >/dev/null 2>&1; then
 fi
 
 if command -v ufw >/dev/null 2>&1; then
-  log "Configuring UFW firewall for SSH port $SSH_PORT..."
+  FIREWALL_SSH_PORT="${SSH_PORT:-22}"
+
+  log "Configuring UFW firewall for SSH port $FIREWALL_SSH_PORT..."
 
   # Remove any existing OpenSSH / 22 rules so we don't keep old defaults
   ufw delete allow OpenSSH  >/dev/null 2>&1 || true
@@ -381,8 +402,8 @@ if command -v ufw >/dev/null 2>&1; then
   ufw delete allow 22/tcp   >/dev/null 2>&1 || true
   ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
-  # Allow custom SSH port (current $SSH_PORT)
-  ufw allow "$SSH_PORT/tcp" >/dev/null 2>&1 || UFW_OK=0
+  # Allow custom SSH port (current FIREWALL_SSH_PORT)
+  ufw allow "${FIREWALL_SSH_PORT}/tcp" >/dev/null 2>&1 || UFW_OK=0
 
   # HTTP/HTTPS
   ufw allow 80/tcp          >/dev/null 2>&1 || UFW_OK=0
