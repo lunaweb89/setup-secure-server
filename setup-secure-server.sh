@@ -319,13 +319,24 @@ fi
 
 # ----------------- Fail2Ban ----------------- #
 
-FAIL_JAIL="/etc/fail2ban/jail.local"
-mkdir -p /etc/fail2ban
-backup "$FAIL_JAIL"
+log "Ensuring Fail2Ban is installed..."
 
-log "Configuring Fail2Ban..."
+if ! dpkg -s fail2ban >/dev/null 2>&1; then
+  log "Fail2Ban not found; installing fail2ban..."
+  if ! apt_install_retry fail2ban; then
+    log "ERROR: Failed to install Fail2Ban. Skipping Fail2Ban configuration."
+    STEP_fail2ban_config="FAILED"
+  fi
+fi
 
-if cat > "$FAIL_JAIL" <<EOF
+if dpkg -s fail2ban >/dev/null 2>&1; then
+  FAIL_JAIL="/etc/fail2ban/jail.local"
+  mkdir -p /etc/fail2ban
+  backup "$FAIL_JAIL"
+
+  log "Configuring Fail2Ban..."
+
+  if cat > "$FAIL_JAIL" <<EOF
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -337,30 +348,62 @@ port     = $CUSTOM_SSH_PORT
 logpath  = %(sshd_log)s
 backend  = systemd
 EOF
-then
-  systemctl enable fail2ban >/dev/null 2>&1 || true
-  systemctl restart fail2ban >/dev/null 2>&1 || true
-  STEP_fail2ban_config="OK"
+  then
+    systemctl enable fail2ban >/dev/null 2>&1 || true
+    systemctl restart fail2ban >/dev/null 2>&1 || true
+    STEP_fail2ban_config="OK"
+  else
+    log "ERROR: Failed to write Fail2Ban jail.local."
+    STEP_fail2ban_config="FAILED"
+  fi
+else
+  log "[WARNING] Fail2Ban is not installed; cannot configure jails."
+  STEP_fail2ban_config="FAILED"
 fi
 
 # ----------------- UFW Firewall ----------------- #
 
-log "Configuring UFW firewall..."
+log "Ensuring UFW is installed (if using UFW as firewall)..."
 
+STEP_ufw_firewall="SKIPPED"
 UFW_OK=1
 
-ufw delete allow OpenSSH  >/dev/null 2>&1 || true
-ufw delete limit OpenSSH  >/dev/null 2>&1 || true
-ufw delete allow 22/tcp   >/dev/null 2>&1 || true
-ufw delete limit 22/tcp   >/dev/null 2>&1 || true
+if ! command -v ufw >/dev/null 2>&1; then
+  log "UFW binary not found; attempting to install ufw..."
+  if ! apt_install_retry ufw; then
+    log "[WARNING] Failed to install UFW. Skipping UFW firewall configuration."
+  fi
+fi
 
-# Ensure custom port is allowed
-ufw allow $CUSTOM_SSH_PORT/tcp        >/dev/null || UFW_OK=0
+if command -v ufw >/dev/null 2>&1; then
+  log "Configuring UFW firewall..."
+  UFW_OK=1
 
-ufw default deny incoming  >/dev/null || UFW_OK=0
-ufw default allow outgoing >/dev/null || UFW_OK=0
+  ufw delete allow OpenSSH  >/dev/null 2>&1 || true
+  ufw delete limit OpenSSH  >/dev/null 2>&1 || true
+  ufw delete allow 22/tcp   >/dev/null 2>&1 || true
+  ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
-ufw --force enable >/dev/null && STEP_ufw_firewall="OK"
+  # Ensure custom port is allowed
+  ufw allow "$CUSTOM_SSH_PORT"/tcp        >/dev/null 2>&1 || UFW_OK=0
+
+  ufw default deny incoming  >/dev/null 2>&1 || UFW_OK=0
+  ufw default allow outgoing >/dev/null 2>&1 || UFW_OK=0
+
+  if ufw --force enable >/dev/null 2>&1; then
+    STEP_ufw_firewall="OK"
+  else
+    STEP_ufw_firewall="FAILED"
+    UFW_OK=0
+  fi
+
+  if (( UFW_OK == 0 )); then
+    log "[WARNING] Some UFW rules may have failed to apply. Check 'ufw status verbose'."
+  fi
+else
+  log "UFW is not available; skipping UFW configuration."
+  STEP_ufw_firewall="SKIPPED"
+fi
 
 # ----------------- Firewalld Configuration ----------------- #
 
@@ -382,7 +425,7 @@ cat > "$FIREWALLD_SERVICE" <<EOF
 EOF
 
 # Check if the custom port exists in the public zone and add if not
-if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
+if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE" 2>/dev/null; then
   # Adding custom port rule for both IPv4 and IPv6
   sed -i "/<\/zone>/i \
   <rule family=\"ipv4\">\n\
@@ -394,26 +437,26 @@ if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
     <source address=\"::/0\"/>\n\
     <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
     <accept/>\n\
-  </rule>" "$FIREWALLD_ZONE"
+  </rule>" "$FIREWALLD_ZONE" 2>/dev/null || true
 
   # Reload firewalld to apply changes to public zone and service
-  firewall-cmd --reload
+  firewall-cmd --reload 2>/dev/null || true
   log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
 else
   log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
 fi
 
 # Add the custom SSH port to firewalld permanently
-firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent
+firewall-cmd --zone=public --add-port=$CUSTOM_SSH_PORT/tcp --permanent 2>/dev/null || true
 
 # Reload firewalld to apply the new port configuration
-firewall-cmd --reload
+firewall-cmd --reload 2>/dev/null || true
 
 # Check if the new custom SSH port is active in firewalld
-if firewall-cmd --list-ports | grep -q "$CUSTOM_SSH_PORT/tcp"; then
+if firewall-cmd --list-ports 2>/dev/null | grep -q "$CUSTOM_SSH_PORT/tcp"; then
   log "Custom SSH port $CUSTOM_SSH_PORT added to Firewalld successfully."
 else
-  log "Failed to add custom SSH port $CUSTOM_SSH_PORT to Firewalld."
+  log "Firewalld port check skipped or failed (service may not be in use)."
 fi
 
 # ----------------- ClamAV ----------------- #
@@ -439,6 +482,7 @@ else
     log "ERROR: Failed to install ClamAV packages."
   fi
 fi
+
 # ----------------- Maldet ----------------- #
 
 log "Checking Maldet installation..."
@@ -542,7 +586,7 @@ fi
 
 if command -v ssh >/dev/null 2>&1; then
   echo "================ SSH Connectivity Test (port $CUSTOM_SSH_PORT) ================"
-  
+
   # Best-effort guess of primary server IP
   SERVER_IP_GUESS="$(hostname -I 2>/dev/null | awk '{print $1}')"
   if [[ -z "${SERVER_IP_GUESS:-}" ]]; then
