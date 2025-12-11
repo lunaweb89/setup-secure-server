@@ -53,8 +53,6 @@ else
   CUSTOM_PORT_ENABLED=0
 fi
 
-LOGGED_PORT="Custom port"  # Masked output for SSH port
-
 # Flag: only touch UFW/Firewalld when true (non-22 custom port)
 ENABLE_CUSTOM_FIREWALL=0
 if (( CUSTOM_PORT_ENABLED == 1 )) && [[ "$CUSTOM_SSH_PORT" != "22" ]]; then
@@ -225,7 +223,6 @@ fi
 # ----------------- SSH ensure service exists ----------------- #
 
 systemctl enable ssh >/dev/null 2>&1 || systemctl enable sshd >/dev/null 2>&1
-systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 CODENAME="$(get_codename)"
 log "Ubuntu codename detected: ${CODENAME:-unknown}"
@@ -307,7 +304,7 @@ else
 fi
 
 # Restart SSH service immediately to apply changes
-systemctl restart sshd
+systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 # Create or update SSH hardening file
 SSH_CONFIG_OK=0
@@ -341,7 +338,7 @@ fi
 # Reload SSH service to apply changes if SSH config is OK
 if [[ "$SSH_CONFIG_OK" -eq 1 ]]; then
   log "Reloading SSH service to apply port $CUSTOM_SSH_PORT..."
-  systemctl restart sshd
+    systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
   ss -tuln | grep "$CUSTOM_SSH_PORT" && log "SSH is now listening on port $CUSTOM_SSH_PORT"
   STEP_ssh_hardening="OK"
@@ -386,13 +383,21 @@ else
 
   UFW_OK=1
 
+  # Remove common SSH rules for port 22/OpenSSH if present
   ufw delete allow OpenSSH  >/dev/null 2>&1 || true
   ufw delete limit OpenSSH  >/dev/null 2>&1 || true
   ufw delete allow 22/tcp   >/dev/null 2>&1 || true
   ufw delete limit 22/tcp   >/dev/null 2>&1 || true
 
+  # Allow new SSH port
   ufw allow "$CUSTOM_SSH_PORT"/tcp        >/dev/null || UFW_OK=0
 
+  # Allow standard web + CyberPanel ports
+  ufw allow 80/tcp    >/dev/null || UFW_OK=0
+  ufw allow 443/tcp   >/dev/null || UFW_OK=0
+  ufw allow 8090/tcp  >/dev/null || UFW_OK=0
+
+  # Default policies
   ufw default deny incoming  >/dev/null || UFW_OK=0
   ufw default allow outgoing >/dev/null || UFW_OK=0
 
@@ -407,8 +412,10 @@ fi
 
 if (( ENABLE_CUSTOM_FIREWALL == 0 )); then
   log "Custom SSH port NOT enabled (or still 22) — skipping Firewalld configuration."
+elif ! command -v firewall-cmd >/dev/null 2>&1; then
+  log "Firewalld (firewall-cmd) not found — skipping Firewalld configuration."
 else
-  log "Configuring Firewalld for SSH port $CUSTOM_SSH_PORT..."
+  log "Configuring Firewalld for SSH + web ports (SSH: $CUSTOM_SSH_PORT)..."
 
   FIREWALLD_SERVICE="/etc/firewalld/services/SSHCustom.xml"
   FIREWALLD_ZONE="/etc/firewalld/zones/public.xml"
@@ -416,10 +423,12 @@ else
   backup "$FIREWALLD_SERVICE"
   backup "$FIREWALLD_ZONE"
 
-  # Create or update the SSHCustom.xml service for the custom SSH port
+  # Service file for custom SSH
   cat > "$FIREWALLD_SERVICE" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <service>
+  <short>SSHCustom</short>
+  <description>Custom SSH port</description>
   <port port="$CUSTOM_SSH_PORT" protocol="tcp"/>
 </service>
 EOF
@@ -436,31 +445,16 @@ EOF
 EOF
   fi
 
-  # Check if the custom port exists in the public zone and add if not
-  if ! grep -q "port=\"$CUSTOM_SSH_PORT\"" "$FIREWALLD_ZONE"; then
-    sed -i "/<\/zone>/i \
-  <rule family=\"ipv4\">\n\
-    <source address=\"0.0.0.0/0\"/>\n\
-    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
-    <accept/>\n\
-  </rule>\n\
-  <rule family=\"ipv6\">\n\
-    <source address=\"::/0\"/>\n\
-    <port port=\"$CUSTOM_SSH_PORT\" protocol=\"tcp\"/>\n\
-    <accept/>\n\
-  </rule>" "$FIREWALLD_ZONE"
+  # Add ports (SSH + web + CyberPanel) to the public zone
+  firewall-cmd --zone=public --add-port="$CUSTOM_SSH_PORT"/tcp --permanent || log "WARNING: firewall-cmd add-port SSH failed."
+  firewall-cmd --zone=public --add-port=80/tcp    --permanent || log "WARNING: firewall-cmd add-port 80 failed."
+  firewall-cmd --zone=public --add-port=443/tcp   --permanent || log "WARNING: firewall-cmd add-port 443 failed."
+  firewall-cmd --zone=public --add-port=8090/tcp  --permanent || log "WARNING: firewall-cmd add-port 8090 failed."
 
-    firewall-cmd --reload || log "WARNING: firewall-cmd reload failed after zone edit."
-    log "Custom port $CUSTOM_SSH_PORT added to Firewalld public zone."
-  else
-    log "Custom port $CUSTOM_SSH_PORT already present in the Firewalld public zone."
-  fi
-
-  firewall-cmd --zone=public --add-port="$CUSTOM_SSH_PORT"/tcp --permanent || log "WARNING: firewall-cmd add-port failed."
-  firewall-cmd --reload || log "WARNING: firewall-cmd reload after add-port failed."
+  firewall-cmd --reload || log "WARNING: firewall-cmd reload failed."
 
   if firewall-cmd --list-ports | grep -q "$CUSTOM_SSH_PORT/tcp"; then
-    log "Custom SSH port $CUSTOM_SSH_PORT added to Firewalld successfully."
+    log "Custom SSH port $CUSTOM_SSH_PORT present in Firewalld."
   else
     log "Failed to verify custom SSH port $CUSTOM_SSH_PORT in Firewalld."
   fi
@@ -489,8 +483,6 @@ else
     log "ERROR: Failed to install ClamAV packages."
   fi
 fi
-
-# ----------------- Maldet ----------------- #
 
 # ----------------- Maldet ----------------- #
 
@@ -534,8 +526,8 @@ fi
 # Ensure dependency for monitor mode (inotifywait) is installed
 if ! command -v inotifywait >/dev/null 2>&1; then
   log "Installing inotify-tools for Maldet (inotifywait)..."
-  apt-get update
-  apt-get install -y inotify-tools
+  apt_update_retry || log "WARNING: apt-get update failed before installing inotify-tools."
+  apt_install_retry inotify-tools || log "WARNING: Failed to install inotify-tools."
 fi
 
 # Ensure maldet tmp directory exists (avoids PID file issues)
@@ -600,7 +592,7 @@ echo " - /var/log/weekly-malware-scan.log"
 echo
 
 # Restart SSH service immediately to update any changes
-systemctl restart sshd
+systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1
 
 # ----------------- SSH Connectivity Test (Custom Port ONLY) ----------------- #
 
