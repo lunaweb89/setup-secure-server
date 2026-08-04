@@ -339,4 +339,35 @@ else
   log "Daily SSL renewal cron already present: $CRON_SSL"
 fi
 
+# -------------------------------------------------------------
+# Rebuild Postfix SNI map if mail SSL fix has been applied
+# This ensures renewed certs are picked up by Postfix overnight
+# -------------------------------------------------------------
+
+if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
+  log "Rebuilding Postfix SNI map (mail SSL fix is installed)..."
+  POSTFIX_SNI_DIR="/etc/postfix/sni"
+  POSTFIX_SNI_MAP="/etc/postfix/sni_map"
+  mkdir -p "$POSTFIX_SNI_DIR"
+  > "$POSTFIX_SNI_MAP"
+  SNI_REBUILT=0
+  for domain_path in /etc/letsencrypt/live/*/; do
+    domain=$(basename "$domain_path")
+    [[ "$domain" == "README" ]] && continue
+    cert="${domain_path}fullchain.pem"
+    key="${domain_path}privkey.pem"
+    [[ -f "$cert" && -f "$key" ]] || continue
+    openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null || continue
+    combined="${POSTFIX_SNI_DIR}/${domain}.pem"
+    cat "$key" "$cert" > "$combined"
+    chmod 640 "$combined"
+    echo "${domain} ${combined}" >> "$POSTFIX_SNI_MAP"
+    SNI_REBUILT=$(( SNI_REBUILT + 1 ))
+  done
+  chmod 640 "$POSTFIX_SNI_MAP"
+  postmap hash:"$POSTFIX_SNI_MAP"
+  systemctl reload postfix 2>/dev/null || systemctl restart postfix 2>/dev/null || true
+  log "Postfix SNI map rebuilt: $SNI_REBUILT domain(s). Postfix reloaded."
+fi
+
 log "Done."

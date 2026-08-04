@@ -2,23 +2,27 @@
 #
 # setup-mail-ssl.sh
 #
-# Fixes SMTP/SSL mismatch on CyberPanel mail servers.
+# Fixes SMTP/SSL mismatch on CyberPanel mail servers so each domain's
+# WordPress/WooCommerce site can send mail via mail.<domain>:587 using
+# that domain's own SSL cert — not the server hostname cert.
 #
 # Root cause:
 #   CyberPanel manages Postfix and Dovecot cert via symlinks:
 #     /etc/postfix/cert.pem  → last domain cert issued via CyberPanel
 #     /etc/dovecot/cert.pem  → same
-#   After issuing SSL for multiple sites the symlinks point to
-#   the LAST domain issued, not the server hostname. Postfix then
-#   presents that domain's cert during SMTP TLS, causing Outlook/
-#   Hotmail to reject mail with a "certificate mismatch" error.
+#   After issuing SSL for multiple sites these symlinks point to
+#   the LAST domain issued. Postfix then presents that cert for ALL
+#   SMTP connections regardless of which domain the client connects to.
 #
 # What this script does:
-#   1. Redirects /etc/postfix/cert.pem and /etc/dovecot/cert.pem
-#      to the server HOSTNAME cert (the correct TLS identity for SMTP)
-#   2. Applies modern TLS settings to Postfix for Outlook compatibility
-#   3. Reports how many per-domain Dovecot SNI entries CyberPanel has
-#      already configured in /etc/dovecot/dovecot.conf
+#   1. Hostname cert: redirects /etc/postfix/cert.pem and
+#      /etc/dovecot/cert.pem to the server HOSTNAME cert (fallback
+#      when no SNI match is found)
+#   2. Postfix SNI: builds /etc/postfix/sni_map so Postfix presents
+#      each domain's own cert when a client connects as mail.<domain>
+#      (fixes WordPress/PHPMailer "certificate verify failed" errors)
+#   3. Modern TLS settings applied via postconf -e for Outlook compat
+#   4. Reports Dovecot per-domain SNI count (managed by CyberPanel)
 #
 # What this script deliberately does NOT touch:
 #   - virtual_transport — CyberPanel uses "dovecot" LDA pipe, not LMTP;
@@ -164,8 +168,69 @@ postconf -e "smtp_tls_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
 postconf -e "smtp_tls_loglevel = 1"
 
 log "Postfix TLS configured."
-log "  smtpd_tls_cert_file → /etc/postfix/cert.pem → $SERVER_HOSTNAME cert"
+log "  smtpd_tls_cert_file → /etc/postfix/cert.pem → $SERVER_HOSTNAME cert (default/fallback)"
 log "  virtual_transport    → $(postconf -h virtual_transport 2>/dev/null || echo '(not set)') [unchanged]"
+
+# -------------------------------------------------------------
+# Build Postfix per-domain SNI map
+#
+# Postfix 3.4+ supports tls_server_sni_maps: when a client connects
+# to mail.example.com:587 with SNI, Postfix looks up the domain in
+# this map and presents example.com's cert instead of the default.
+# This is what allows WordPress to use mail.inszhangfen.com:587
+# without a certificate mismatch error.
+#
+# Combined PEM files (key + fullchain) are stored in /etc/postfix/sni/
+# and referenced by the hash map /etc/postfix/sni_map.
+# -------------------------------------------------------------
+
+log "Building Postfix per-domain SNI map..."
+
+POSTFIX_SNI_DIR="/etc/postfix/sni"
+POSTFIX_SNI_MAP="/etc/postfix/sni_map"
+
+mkdir -p "$POSTFIX_SNI_DIR"
+chmod 750 "$POSTFIX_SNI_DIR"
+
+# Rebuild map from scratch each run (picks up newly issued certs)
+> "$POSTFIX_SNI_MAP"
+POSTFIX_SNI_COUNT=0
+
+for domain_path in /etc/letsencrypt/live/*/; do
+  domain=$(basename "$domain_path")
+  [[ "$domain" == "README" ]] && continue
+
+  cert="${domain_path}fullchain.pem"
+  key="${domain_path}privkey.pem"
+  [[ -f "$cert" && -f "$key" ]] || continue
+
+  # Skip expired certs silently
+  if ! openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null; then
+    warn "  Skipping expired cert: $domain"
+    continue
+  fi
+
+  # Postfix SNI needs key + fullchain concatenated in one PEM file
+  combined="${POSTFIX_SNI_DIR}/${domain}.pem"
+  cat "$key" "$cert" > "$combined"
+  chmod 640 "$combined"
+
+  echo "${domain} ${combined}" >> "$POSTFIX_SNI_MAP"
+  log "  Postfix SNI mapped: $domain"
+  POSTFIX_SNI_COUNT=$(( POSTFIX_SNI_COUNT + 1 ))
+done
+
+chmod 640 "$POSTFIX_SNI_MAP"
+
+if (( POSTFIX_SNI_COUNT > 0 )); then
+  postmap hash:"$POSTFIX_SNI_MAP"
+  postconf -e "tls_server_sni_maps = hash:${POSTFIX_SNI_MAP}"
+  log "Postfix SNI: $POSTFIX_SNI_COUNT domain(s) mapped."
+  log "  WordPress SMTP can now use mail.<domain>:587 with correct cert per domain."
+else
+  warn "No domain certs found for SNI map — hostname cert will be used for all connections."
+  warn "Run ssl-auto-issue.sh first to issue domain certs, then re-run this script."
+fi
 
 # -------------------------------------------------------------
 # Report Dovecot SNI status
@@ -235,11 +300,16 @@ echo "  Mail SSL Fix — Summary"
 echo "  Completed: $(date -Is)"
 echo "============================================================"
 echo
-echo "  Hostname:          $SERVER_HOSTNAME"
-echo "  Hostname cert:     $HOSTNAME_CERT"
-echo "  Postfix TLS:       /etc/postfix/cert.pem → hostname cert"
-echo "  Dovecot default:   /etc/dovecot/cert.pem → hostname cert"
-echo "  Dovecot SNI:       $SNI_COUNT domain(s) (managed by CyberPanel)"
+echo "  Hostname:             $SERVER_HOSTNAME"
+echo "  Hostname cert:        $HOSTNAME_CERT"
+echo "  Postfix default cert: /etc/postfix/cert.pem → hostname cert"
+echo "  Postfix SNI:          $POSTFIX_SNI_COUNT domain(s) — mail.<domain>:587 uses own cert"
+echo "  Dovecot default cert: /etc/dovecot/cert.pem → hostname cert"
+echo "  Dovecot SNI:          $SNI_COUNT domain(s) (managed by CyberPanel)"
+echo
+echo "  WordPress SMTP setting for each hosted site:"
+echo "    Host: mail.<domain>   Port: 587   Encryption: STARTTLS"
+echo "    (each domain presents its own SSL cert — no mismatch)"
 echo
 echo "------------------------------------------------------------"
 echo "  MANUAL STEPS — required for Outlook/Gmail deliverability"
@@ -250,11 +320,11 @@ echo "     Your server IP must resolve back to: $SERVER_HOSTNAME"
 echo "     Set in Hetzner Console → Servers → IP Addresses → PTR"
 echo "     Without this, Outlook/Hotmail will reject your mail."
 echo
-echo "  2. Per-domain Dovecot SNI (fixes client cert warnings):"
+echo "  2. Per-domain Dovecot SNI (fixes IMAP/POP3 cert warnings):"
 echo "     For each hosted domain, issue SSL via CyberPanel:"
 echo "     CyberPanel → SSL → Manage SSL → Issue SSL → <domain>"
 echo "     CyberPanel automatically adds the SNI block to Dovecot."
-echo "     Then re-run this script to verify the count."
+echo "     Then re-run this script to update both Dovecot and Postfix SNI."
 echo
 echo "  3. SPF — for each domain sending email:"
 echo "     DNS TXT @ → v=spf1 ip4:<server-ip> ~all"
