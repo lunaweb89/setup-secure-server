@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.0] – 2026-08-04
+
+### Added
+
+**`setup-mail-ssl.sh`** (new script)
+- Fixes SMTP/SSL mismatch that causes Outlook/Hotmail to reject mail
+- Configures Postfix TLS using the server hostname's SSL cert (`postconf -e` — non-destructive, CyberPanel-compatible)
+- Configures Dovecot SNI: each hosted domain presents its own SSL cert for IMAP/POP3 connections, eliminating certificate mismatch warnings in Outlook/Thunderbird/Apple Mail
+- Ensures Dovecot LMTP unix socket is active so Postfix delivers mail into Dovecot mailboxes correctly
+- Enables `lmtp` in Dovecot protocols if not already set
+- CyberPanel-safe: writes to `/etc/dovecot/conf.d/99-*` drop-in files only, does not touch CyberPanel-managed config files
+- Scans `/etc/letsencrypt/live/*/` for all issued certs (works with both CyberPanel acme.sh and certbot)
+- Prints a checklist of remaining manual DNS steps: PTR record (most important for Outlook), SPF, DKIM (via CyberPanel), DMARC
+- Accepts `--hostname` flag or auto-detects; falls back to snakeoil cert with a warning if hostname cert is missing
+- Re-run any time after adding new domain certs to update the SNI map
+- Logs to `/var/log/mail-ssl-setup.log`
+
+**`server-toolkit.sh`**
+- New option **8 — Mail SSL Fix** runs `setup-mail-ssl.sh`
+- Exit shifted from option 8 to **option 9**
+- Status view now tracks `.ssl_auto_issue_last_run` and `.mail_ssl_setup_last_run` markers
+
+---
+
 ## [1.2.0] – 2026-08-04
 
 ### Added

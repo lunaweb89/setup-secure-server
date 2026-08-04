@@ -9,6 +9,7 @@
 #   - server-optimizer.sh             (performance tuning)
 #   - server-optimizer-rollback.sh    (rollback optimizer changes)
 #   - ssl-auto-issue.sh               (issue & auto-renew SSL certs)
+#   - setup-mail-ssl.sh               (fix SMTP/SSL mismatch, Dovecot SNI)
 #
 
 set -euo pipefail
@@ -47,6 +48,11 @@ run_ssl_auto_issue() {
   bash <(curl -fsSL "${BASE_URL}/ssl-auto-issue.sh")
 }
 
+run_mail_ssl_fix() {
+  log "Starting mail SSL fix (Dovecot SNI + Postfix TLS)..."
+  bash <(curl -fsSL "${BASE_URL}/setup-mail-ssl.sh")
+}
+
 show_status() {
   echo "============================================================"
   echo "                 LunaServers – Status"
@@ -58,7 +64,9 @@ show_status() {
     /root/.backup_module_setup_done \
     /root/.restore_module_last_run \
     /root/.server_optimizer_last_run \
-    /root/.server_optimizer_rollback_last_run
+    /root/.server_optimizer_rollback_last_run \
+    /root/.ssl_auto_issue_last_run \
+    /root/.mail_ssl_setup_last_run
   do
     if [[ -f "$f" ]]; then
       echo "  [OK]  Marker present: $f"
@@ -160,11 +168,19 @@ while :; do
      - Installs a daily cron (02:00) to auto-renew expiring certs
      - Safe to re-run; skips domains with valid certs
 
-  8) Exit Toolkit
+  8) Mail SSL Fix (SMTP mismatch / Outlook rejection)
+     - Configures Postfix TLS using the server hostname cert
+     - Configures Dovecot SNI: each domain presents its own SSL cert
+       for IMAP/POP3 (fixes Outlook "certificate mismatch" errors)
+     - Enables LMTP delivery pipeline between Postfix and Dovecot
+     - Run AFTER option 7 (ssl-auto-issue) so certs are already issued
+     - Re-run any time you add new domains to pick up new certs
+
+  9) Exit Toolkit
 ============================================================
 MENU
 
-  read -r -p "Select an option [1-8]: " choice
+  read -r -p "Select an option [1-9]: " choice
 
   case "$choice" in
     1) run_full_secure_setup ;;
@@ -174,7 +190,8 @@ MENU
     5) run_optimizer_rollback ;;
     6) show_status ;;
     7) run_ssl_auto_issue ;;
-    8) exit 0 ;;
-    *) echo "Invalid choice. Please enter 1–8." ;;
+    8) run_mail_ssl_fix ;;
+    9) exit 0 ;;
+    *) echo "Invalid choice. Please enter 1–9." ;;
   esac
 done
