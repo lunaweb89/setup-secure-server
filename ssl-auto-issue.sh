@@ -196,13 +196,18 @@ issue_ssl_hostname() {
 
   mkdir -p "/etc/letsencrypt/live/${domain}"
 
+  # Always use production Let's Encrypt, not staging
+  "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
+
   # Method 1: webroot (preferred — no service interruption)
   # OLS serves the default host at /usr/local/lsws/DEFAULT/html/
+  # NOTE: only works if the domain has an OLS vhost. Mail-only hostnames
+  # (e.g. mail.<domain>) have no vhost and must use standalone below.
   local WEBROOT="/usr/local/lsws/DEFAULT/html"
   if [[ -d "$WEBROOT" ]]; then
-    log "Issuing hostname cert via acme.sh webroot (no service interruption)..."
+    log "Issuing cert via acme.sh webroot (no service interruption)..."
     mkdir -p "${WEBROOT}/.well-known/acme-challenge"
-    if "$ACME" --issue --webroot "$WEBROOT" -d "$domain" 2>&1; then
+    if "$ACME" --issue --server letsencrypt --webroot "$WEBROOT" -d "$domain" 2>&1; then
       "$ACME" --installcert -d "$domain" \
         --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
         --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
@@ -211,7 +216,8 @@ issue_ssl_hostname() {
   fi
 
   # Method 2: standalone (stops OLS briefly if needed)
-  log "Trying acme.sh standalone for hostname cert (brief OLS pause)..."
+  # Used automatically when webroot fails (e.g. mail-only hostnames with no OLS vhost)
+  log "Trying acme.sh standalone (brief OLS pause — will restart immediately after)..."
   local ols_was_running=false
   if systemctl is-active --quiet lsws 2>/dev/null; then
     ols_was_running=true
@@ -219,7 +225,7 @@ issue_ssl_hostname() {
   fi
 
   local result=1
-  if "$ACME" --issue --standalone -d "$domain" 2>&1; then
+  if "$ACME" --issue --server letsencrypt --standalone -d "$domain" 2>&1; then
     "$ACME" --installcert -d "$domain" \
       --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
       --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
@@ -383,7 +389,11 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
     SNI_REBUILT=$(( SNI_REBUILT + 1 ))
   done
   chmod 640 "$POSTFIX_SNI_MAP"
-  postmap hash:"$POSTFIX_SNI_MAP"
+  # -F flag is required: tells postmap to read each .pem file and embed its
+  # base64-encoded content in the database. Without -F, the database stores
+  # only the literal file path, which Postfix cannot decode → internal_error.
+  postmap -F hash:"$POSTFIX_SNI_MAP"
+  chmod 640 "${POSTFIX_SNI_MAP}.db" 2>/dev/null || true
   systemctl reload postfix 2>/dev/null || systemctl restart postfix 2>/dev/null || true
   log "Postfix SNI map rebuilt: $SNI_REBUILT entry(ies). Postfix reloaded."
 fi

@@ -276,7 +276,11 @@ done
 chmod 640 "$POSTFIX_SNI_MAP"
 
 if (( POSTFIX_SNI_COUNT > 0 )); then
-  postmap hash:"$POSTFIX_SNI_MAP"
+  # -F flag is required: embeds each .pem file's content as base64 in the database.
+  # Plain `postmap` (no -F) stores the literal file path — Postfix cannot decode
+  # that string and sends tlsv1 alert internal_error to every connecting client.
+  postmap -F hash:"$POSTFIX_SNI_MAP"
+  chmod 640 "${POSTFIX_SNI_MAP}.db" 2>/dev/null || true
   postconf -e "tls_server_sni_maps = hash:${POSTFIX_SNI_MAP}"
   log "Postfix SNI: $POSTFIX_SNI_COUNT entry(ies) mapped."
   log "  WordPress SMTP can now use mail.<domain>:587 with correct cert per domain."

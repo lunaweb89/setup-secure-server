@@ -5,6 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.3] – 2026-08-04
+
+### Fixed (systemic bugs — would repeat on every future domain)
+
+**`setup-mail-ssl.sh`** and **`ssl-auto-issue.sh`**
+
+- **`postmap -F` (root cause of all `tlsv1 alert internal_error` failures)**: `tls_server_sni_maps` requires `postmap -F hash:…`, not plain `postmap hash:…`. Without `-F`, postmap stores the literal `.pem` file path string as the map value; Postfix tries to base64-decode that path string at TLS handshake time, gets garbage, and sends `internal_error` to every SNI-routed client. With `-F`, postmap reads each referenced `.pem` file and embeds its base64-encoded content in the database. Added `chmod 640` on the resulting `.db` file (contains private key material).
+
+- **Staging CA / production CA (`--server letsencrypt`)**: acme.sh's default CA can be set to the staging environment by previous `--staging` runs. All `acme.sh --issue` calls in `issue_ssl_hostname()` now explicitly pass `--server letsencrypt`, and a `--set-default-ca --server letsencrypt` call runs before each issuance to reset the default permanently.
+
+- **Standalone fallback for mail-only hostnames**: `mail.<domain>` subdomains have no OLS vhost, so LiteSpeed returns 404 for HTTP-01 webroot challenges regardless of where the challenge file is placed. The webroot method already falls through to standalone; added a log comment explaining why so the fallback is not mistaken for a bug.
+
+---
+
 ## [1.3.2] – 2026-08-04
 
 ### Fixed
