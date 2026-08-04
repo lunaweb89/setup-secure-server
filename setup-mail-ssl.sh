@@ -213,14 +213,30 @@ for domain_path in /etc/letsencrypt/live/*/; do
     continue
   fi
 
+  # Skip staging/test certs — Postfix cannot build a valid TLS context from an
+  # untrusted chain; it sends internal_error to the connecting client instead.
+  if openssl x509 -noout -issuer -in "$cert" 2>/dev/null | grep -qi "staging\|fake\|test\|invalid"; then
+    warn "  STAGING cert detected for $domain — skipping (re-issue via CyberPanel SSL or acme.sh --server letsencrypt)"
+    continue
+  fi
+
   # Postfix SNI needs key + fullchain concatenated in one PEM file (key first)
   combined="${POSTFIX_SNI_DIR}/${domain}.pem"
   cat "$key" "$cert" > "$combined"
   chmod 640 "$combined"
 
-  # Validate the combined PEM — a bad file causes Postfix to send tlsv1 alert internal_error
+  # Validate combined PEM — bad file → Postfix sends tlsv1 alert internal_error
   if ! openssl x509 -noout -in "$combined" 2>/dev/null; then
     warn "  Combined PEM invalid for $domain (cert unreadable) — skipping"
+    rm -f "$combined"
+    continue
+  fi
+
+  # Verify private key matches certificate — mismatch → Postfix internal_error
+  _cert_pub=$(openssl x509 -pubkey -noout -in "$combined" 2>/dev/null)
+  _key_pub=$(openssl pkey -pubout -in "$combined" 2>/dev/null)
+  if [[ -z "$_cert_pub" || -z "$_key_pub" || "$_cert_pub" != "$_key_pub" ]]; then
+    warn "  Key/cert MISMATCH for $domain — skipping (re-issue SSL via CyberPanel)"
     rm -f "$combined"
     continue
   fi

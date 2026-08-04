@@ -359,10 +359,16 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
     key="${domain_path}privkey.pem"
     [[ -f "$cert" && -f "$key" ]] || continue
     openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null || continue
+    # Skip staging/test certs
+    openssl x509 -noout -issuer -in "$cert" 2>/dev/null | grep -qi "staging\|fake\|test\|invalid" && continue
     combined="${POSTFIX_SNI_DIR}/${domain}.pem"
     cat "$key" "$cert" > "$combined"
     chmod 640 "$combined"
     openssl x509 -noout -in "$combined" 2>/dev/null || { rm -f "$combined"; continue; }
+    # Skip key/cert mismatches
+    _cp=$(openssl x509 -pubkey -noout -in "$combined" 2>/dev/null)
+    _kp=$(openssl pkey -pubout -in "$combined" 2>/dev/null)
+    [[ -z "$_cp" || -z "$_kp" || "$_cp" != "$_kp" ]] && { rm -f "$combined"; continue; }
     echo "${domain} ${combined}" >> "$POSTFIX_SNI_MAP"
     _SNI_PEM["$domain"]="$combined"
     SNI_REBUILT=$(( SNI_REBUILT + 1 ))

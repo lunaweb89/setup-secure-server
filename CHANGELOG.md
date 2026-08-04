@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.2] – 2026-08-04
+
+### Fixed
+
+**`setup-mail-ssl.sh`** and **`ssl-auto-issue.sh`**
+- **Root cause confirmed**: `mail.<domain>` SSL certs issued by Let's Encrypt **staging** environment (issuer contains "STAGING") cause Postfix to fail building the TLS context and send `tlsv1 alert internal_error` to connecting SMTP clients — even though the cert structure is technically valid
+- Added staging/test cert detection: certs whose issuer contains "staging", "fake", "test", or "invalid" are skipped with a warning; the `mail.<domain>` fallback entry then points to the production bare-domain cert instead
+- Added private-key/certificate mismatch detection (`openssl pkey -pubout` vs `openssl x509 -pubkey`): a mismatched pair is silently skipped rather than producing a Postfix `internal_error` at TLS handshake time
+- Both checks applied in `setup-mail-ssl.sh` (interactive) and the nightly SNI rebuild block in `ssl-auto-issue.sh`
+
+---
+
 ## [1.3.1] – 2026-08-04
 
 ### Fixed
