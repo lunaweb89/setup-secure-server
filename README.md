@@ -2,7 +2,7 @@
 
 This repository provides a complete toolkit to:
 
-- Harden a fresh Ubuntu server (SSH, UFW, Fail2Ban, auto-updates, malware scanning)
+- Harden a fresh Ubuntu server (SSH, UFW, Fail2Ban, kernel hardening, auto-updates, malware scanning, swap)
 - Configure automated Borg backups with a Hetzner Storage Box
 - Restore websites quickly in disaster or migration scenarios
 - Optimize performance for OpenLiteSpeed + CyberPanel + MariaDB + Redis
@@ -27,8 +27,12 @@ The menu includes:
 
 1) Full Secure Server Setup
    - Hardens SSH (custom port), UFW, Fail2Ban
+   - Kernel security hardening (sysctl: rp_filter, ICMP redirects,
+     SYN cookies, ptrace restriction, kernel pointer hiding)
+   - Fail2Ban jails: SSH + WordPress wp-login + CyberPanel + recidive
    - Enables unattended security updates
    - Installs ClamAV + Maldet
+   - Creates swap file (2–4 GB based on RAM)
    - Optionally runs:
        * Auto Backup Setup
        * Performance Optimizer
@@ -62,13 +66,12 @@ The menu includes:
    - Reapplies sysctl and restarts services safely
 
 6) View Status
-   Shows markers:
-       /root/.secure_server_setup_done
-       /root/.backup_module_setup_done
-       /root/.restore_module_last_run
-       /root/.server_optimizer_last_run
-       /root/.server_optimizer_rollback_last_run
-   Also displays UFW and Fail2Ban status.
+   Shows setup markers, then checks:
+   - Cron files present (daily-borg-backup, auto-security-updates,
+     weekly-malware-scan)
+   - Live Borg repository connectivity (passphrase + SSH key test)
+   - UFW firewall status
+   - Fail2Ban service status
 
 ------------------------------------------------------------
 RECOMMENDED ORDER FOR A NEW SERVER
