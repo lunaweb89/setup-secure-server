@@ -8,6 +8,7 @@
 #   - restore-backup.sh               (disaster recovery)
 #   - server-optimizer.sh             (performance tuning)
 #   - server-optimizer-rollback.sh    (rollback optimizer changes)
+#   - ssl-auto-issue.sh               (issue & auto-renew SSL certs)
 #
 
 set -euo pipefail
@@ -39,6 +40,11 @@ run_optimizer_only() {
 run_optimizer_rollback() {
   log "Starting performance optimizer rollback..."
   bash <(curl -fsSL "${BASE_URL}/server-optimizer-rollback.sh")
+}
+
+run_ssl_auto_issue() {
+  log "Starting SSL auto-issue & renewal setup..."
+  bash <(curl -fsSL "${BASE_URL}/ssl-auto-issue.sh")
 }
 
 show_status() {
@@ -148,11 +154,17 @@ while :; do
   6) View Status
      - Shows markers, Borg repo & connectivity, cronjob presence
 
-  7) Exit Toolkit
+  7) SSL Auto-Issue & Renewal Setup
+     - Issues Let's Encrypt SSL for server hostname + all CyberPanel sites
+     - Verifies DNS points to this server before each attempt
+     - Installs a daily cron (02:00) to auto-renew expiring certs
+     - Safe to re-run; skips domains with valid certs
+
+  8) Exit Toolkit
 ============================================================
 MENU
 
-  read -r -p "Select an option [1-7]: " choice
+  read -r -p "Select an option [1-8]: " choice
 
   case "$choice" in
     1) run_full_secure_setup ;;
@@ -161,7 +173,8 @@ MENU
     4) run_optimizer_only ;;
     5) run_optimizer_rollback ;;
     6) show_status ;;
-    7) exit 0 ;;
-    *) echo "Invalid choice. Please enter 1–7." ;;
+    7) run_ssl_auto_issue ;;
+    8) exit 0 ;;
+    *) echo "Invalid choice. Please enter 1–8." ;;
   esac
 done

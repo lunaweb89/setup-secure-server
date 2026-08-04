@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.2.0] – 2026-08-04
+
+### Added
+
+**`ssl-auto-issue.sh`** (new script)
+- Auto-issues Let's Encrypt SSL certificates for the server hostname and every website registered in CyberPanel
+- Verifies DNS points to this server (`dig +short A`) before each attempt — prevents Let's Encrypt failures for domains not yet pointed here
+- Installs a daily cron job (`/etc/cron.d/daily-ssl-renew`) at 02:00 to automatically renew expiring certs going forward
+- CyberPanel's `issueSSL` mechanism is idempotent: skips domains with valid, non-expiring certs
+- One domain failing does not abort the rest
+- Logs all output to `/var/log/ssl-auto-issue.log`
+- Prints a summary: issued OK / skipped (DNS mismatch) / failed
+- Safe to re-run at any time
+
+**`server-toolkit.sh`**
+- New option **7 — SSL Auto-Issue & Renewal Setup** runs `ssl-auto-issue.sh`
+- Exit shifted from option 7 to **option 8**
+
+---
+
 ## [1.1.0] – 2026-08-04
 
 ### Added
