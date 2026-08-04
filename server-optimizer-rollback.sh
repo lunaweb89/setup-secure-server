@@ -63,10 +63,11 @@ fi
 # 3. PHP LSAPI php.ini rollback (all versions)
 ###############################################
 
-for PHPINI in /usr/local/lsws/lsphp*/etc/php.ini; do
+# Use the same find pattern as server-optimizer.sh to cover all php.ini locations
+while IFS= read -r PHPINI; do
   [[ -f "$PHPINI" ]] || continue
   restore_latest "$PHPINI" "${PHPINI}.bak-*"
-done
+done < <(find /usr/local/lsws -type f -name php.ini 2>/dev/null || true)
 
 ###############################################
 # 4. Redis config rollback
@@ -91,14 +92,11 @@ else
 fi
 
 ###############################################
-# 6. Limits rollback (manual notice)
+# 6. Limits rollback
 ###############################################
 
-if [[ -f /etc/security/limits.conf ]]; then
-  warn "NOTE: /etc/security/limits.conf was overwritten by server-optimizer.sh"
-  warn "      No automatic backup was created by default. If you have your own"
-  warn "      backup, restore it manually and then re-login."
-fi
+restore_latest /etc/security/limits.conf "/etc/security/limits.conf.bak-*"
+warn "NOTE: /etc/security/limits.conf changes take effect on next login."
 
 ###############################################
 # 7. Apply sysctl and restart services
