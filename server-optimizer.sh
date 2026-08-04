@@ -115,6 +115,8 @@ fi
 
 log "Updating /etc/security/limits.conf..."
 
+cp /etc/security/limits.conf "/etc/security/limits.conf.bak-$timestamp" 2>/dev/null || true
+
 cat > /etc/security/limits.conf <<EOF
 * soft nofile 1024000
 * hard nofile 1024000
@@ -229,6 +231,17 @@ log "Optimizing MariaDB..."
 MARIADB_CONF="/etc/mysql/mariadb.conf.d/99-optimized.cnf"
 cp "$MARIADB_CONF" "$MARIADB_CONF.bak-$timestamp" 2>/dev/null || true
 
+# innodb_redo_log_capacity replaces innodb_log_file_size in MariaDB 10.9+
+MARIADB_VER_RAW=$(mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "0.0")
+MARIADB_MAJOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f1)
+MARIADB_MINOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f2)
+if (( MARIADB_MAJOR > 10 )) || (( MARIADB_MAJOR == 10 && MARIADB_MINOR >= 9 )); then
+  INNODB_LOG_SETTING="innodb_redo_log_capacity    = 536870912"
+else
+  INNODB_LOG_SETTING="innodb_log_file_size         = 256M"
+fi
+log "MariaDB version ${MARIADB_VER_RAW} detected — using: ${INNODB_LOG_SETTING%%=*}"
+
 cat > "$MARIADB_CONF" <<EOF
 [mysqld]
 max_connections         = 300
@@ -241,7 +254,7 @@ query_cache_type        = 0
 query_cache_size        = 0
 
 innodb_buffer_pool_size = ${MARIADB_MB}M
-innodb_log_file_size    = 256M
+${INNODB_LOG_SETTING}
 innodb_flush_method     = O_DIRECT
 innodb_flush_log_at_trx_commit = 2
 innodb_file_per_table   = 1
@@ -314,7 +327,7 @@ mysql -uroot -e "SHOW GLOBAL STATUS LIKE 'Threads_running';" 2>/dev/null || true
 echo
 
 echo "Redis usage:"
-redis-cli info memory | egrep "used_memory_human|maxmemory_human|mem_fragmentation_ratio" || true
+redis-cli info memory | grep -E "used_memory_human|maxmemory_human|mem_fragmentation_ratio" || true
 echo
 
 echo "OpenLiteSpeed status:"

@@ -8,7 +8,7 @@
 # - Excludes raw MySQL data directory (/var/lib/mysql) from Borg
 # - Auto-generates encryption passphrase and prints it at the end
 # - Stores repo URL + passphrase for restore helpers
-# - Daily backups at 08:30
+# - Daily backups at 03:00 (off-hours)
 # - Retention: 7 daily, 4 weekly, 3 monthly
 #
 
@@ -355,9 +355,10 @@ CRON_BACKUP="/etc/cron.d/daily-borg-backup"
 cat > "$CRON_BACKUP" << 'EOF'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=root
 
-# Daily full-system Borg backup (08:30 every day)
-30 8 * * * root /usr/local/bin/pre-upgrade-backup.sh
+# Daily full-system Borg backup (03:00 every day, off-hours)
+0 3 * * * root /usr/local/bin/pre-upgrade-backup.sh
 EOF
 
 chmod 644 "$CRON_BACKUP"

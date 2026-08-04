@@ -11,8 +11,11 @@
 #   - Harden SSH config (move SSH to custom port, root+password allowed)
 #   - Install & configure Fail2Ban
 #   - Configure & enable UFW firewall (SSH ONLY on custom port, not 22)
+#   - Kernel network + security hardening (sysctl)
 #   - Install ClamAV + Maldet
 #   - Create weekly malware scan cron job
+#   - Fail2Ban jails for SSH, WordPress wp-login, CyberPanel, recidive
+#   - Create swap file (2–4GB based on RAM)
 #
 # Run directly:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-secure-server.sh)
@@ -31,6 +34,8 @@ STEP_clamav_install="FAILED"
 STEP_maldet_install="FAILED"
 STEP_weekly_malware_cron="FAILED"
 STEP_initial_unattended_upgrade="FAILED"
+STEP_kernel_hardening="FAILED"
+STEP_swap="FAILED"
 
 # ----------------- Custom Port Configuration ----------------- #
 
@@ -350,10 +355,24 @@ fi
 # ----------------- Fail2Ban ----------------- #
 
 FAIL_JAIL="/etc/fail2ban/jail.local"
-mkdir -p /etc/fail2ban
+mkdir -p /etc/fail2ban/filter.d
 backup "$FAIL_JAIL"
 
-log "Configuring Fail2Ban..."
+log "Configuring Fail2Ban (SSH + WordPress + CyberPanel + recidive)..."
+
+# WordPress brute force filter — matches POST to wp-login.php in OLS access logs
+cat > /etc/fail2ban/filter.d/wordpress-bruteforce.conf <<'FILTEOF'
+[Definition]
+failregex = ^<HOST> .* "POST .*/wp-login\.php
+ignoreregex =
+FILTEOF
+
+# CyberPanel brute force filter — matches failed logins in CyberPanel logs
+cat > /etc/fail2ban/filter.d/cyberpanel-bruteforce.conf <<'FILTEOF'
+[Definition]
+failregex = Failed to login.*from IP:\s*<HOST>
+ignoreregex =
+FILTEOF
 
 if cat > "$FAIL_JAIL" <<EOF
 [DEFAULT]
@@ -366,6 +385,35 @@ enabled  = true
 port     = $CUSTOM_SSH_PORT
 logpath  = %(sshd_log)s
 backend  = systemd
+
+# WordPress wp-login.php brute force (10 attempts = 2h ban)
+# Safe for shoppers — they never POST to wp-login.php
+[wordpress-bruteforce]
+enabled  = true
+filter   = wordpress-bruteforce
+port     = http,https
+logpath  = /usr/local/lsws/logs/access.log
+maxretry = 10
+findtime = 10m
+bantime  = 2h
+
+# CyberPanel panel login brute force (10 attempts = 2h ban)
+[cyberpanel-bruteforce]
+enabled  = true
+filter   = cyberpanel-bruteforce
+port     = 8090
+logpath  = /usr/local/CyberCP/logs/main.log
+maxretry = 10
+findtime = 10m
+bantime  = 2h
+
+# Recidive — IPs caught by any jail 5+ times get a 1-week ban
+[recidive]
+enabled  = true
+logpath  = /var/log/fail2ban.log
+bantime  = 1w
+findtime = 1d
+maxretry = 5
 EOF
 then
   systemctl enable fail2ban >/dev/null 2>&1 || true
@@ -457,6 +505,53 @@ EOF
     log "Custom SSH port $CUSTOM_SSH_PORT present in Firewalld."
   else
     log "Failed to verify custom SSH port $CUSTOM_SSH_PORT in Firewalld."
+  fi
+fi
+
+# ----------------- Kernel Security Hardening ----------------- #
+
+KERNEL_HARDENING_FILE="/etc/sysctl.d/98-security-hardening.conf"
+backup "$KERNEL_HARDENING_FILE"
+
+log "Applying kernel security hardening (sysctl)..."
+
+if cat > "$KERNEL_HARDENING_FILE" <<'EOF'
+# Block IP spoofing via reverse-path filter
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Ignore ICMP redirects (prevents routing/MITM manipulation)
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# Ignore broadcast pings (Smurf attack prevention)
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# Ignore bogus ICMP error responses
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# SYN flood protection (TCP SYN cookies)
+net.ipv4.tcp_syncookies = 1
+
+# Hide kernel log from non-root (prevents info leaks)
+kernel.dmesg_restrict = 1
+
+# Hide kernel symbol addresses from non-root
+kernel.kptr_restrict = 2
+
+# Restrict ptrace scope (prevents process injection by non-root users)
+kernel.yama.ptrace_scope = 1
+EOF
+then
+  if sysctl -p "$KERNEL_HARDENING_FILE" >/dev/null 2>&1; then
+    log "Kernel security hardening applied."
+    STEP_kernel_hardening="OK"
+  else
+    warn "Some kernel sysctl settings may not have applied; check $KERNEL_HARDENING_FILE manually."
+    STEP_kernel_hardening="PARTIAL"
   fi
 fi
 
@@ -562,6 +657,45 @@ if unattended-upgrade -v >> /var/log/auto-security-updates.log 2>&1; then
   STEP_initial_unattended_upgrade="OK"
 fi
 
+# ----------------- Swap Setup ----------------- #
+
+log "Checking swap configuration..."
+
+if swapon --show | grep -q .; then
+  log "Swap already active — skipping swap creation."
+  STEP_swap="SKIPPED"
+else
+  TOTAL_RAM_KB_SWAP=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  TOTAL_RAM_MB_SWAP=$((TOTAL_RAM_KB_SWAP / 1024))
+
+  # 2GB swap for servers < 16GB RAM; 4GB for larger servers
+  if (( TOTAL_RAM_MB_SWAP < 16384 )); then
+    SWAP_MB=2048
+  else
+    SWAP_MB=4096
+  fi
+
+  log "Creating ${SWAP_MB}MB swap file at /swapfile (RAM: ${TOTAL_RAM_MB_SWAP}MB)..."
+
+  SWAP_OK=0
+  if fallocate -l "${SWAP_MB}M" /swapfile 2>/dev/null || \
+     dd if=/dev/zero of=/swapfile bs=1M count="$SWAP_MB" status=none 2>/dev/null; then
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile && SWAP_OK=1
+  fi
+
+  if (( SWAP_OK == 1 )); then
+    if ! grep -q '/swapfile' /etc/fstab; then
+      echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    fi
+    log "Swap file (${SWAP_MB}MB) created, activated, and added to /etc/fstab."
+    STEP_swap="OK"
+  else
+    warn "Failed to create or activate swap file."
+    STEP_swap="FAILED"
+  fi
+fi
+
 # ----------------- Reboot Notification ----------------- #
 
 if [[ -f /var/run/reboot-required ]]; then
@@ -585,6 +719,8 @@ printf "clamav_install                 : %s\n" "$STEP_clamav_install"
 printf "maldet_install                 : %s\n" "$STEP_maldet_install"
 printf "weekly_malware_cron            : %s\n" "$STEP_weekly_malware_cron"
 printf "initial_unattended_upgrade     : %s\n" "$STEP_initial_unattended_upgrade"
+printf "kernel_hardening               : %s\n" "$STEP_kernel_hardening"
+printf "swap                           : %s\n" "$STEP_swap"
 echo "=============================================================="
 echo "[INFO] Logs:"
 echo " - /var/log/auto-security-updates.log"

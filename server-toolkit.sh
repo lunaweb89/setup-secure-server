@@ -62,6 +62,35 @@ show_status() {
   done
 
   echo
+  echo "Cronjob presence:"
+  for cron_file in \
+    /etc/cron.d/daily-borg-backup \
+    /etc/cron.d/auto-security-updates \
+    /etc/cron.d/weekly-malware-scan
+  do
+    if [[ -f "$cron_file" ]]; then
+      echo "  [OK]  Present: $cron_file"
+    else
+      echo "  [--]  Missing: $cron_file"
+    fi
+  done
+
+  echo
+  echo "Borg backup connectivity:"
+  if [[ -f /root/.borg-repository ]]; then
+    echo "  Repo: $(<"/root/.borg-repository")"
+    if [[ -x /usr/local/bin/borg-passphrase-test.sh ]]; then
+      /usr/local/bin/borg-passphrase-test.sh \
+        && echo "  [OK]  Borg connectivity verified." \
+        || echo "  [!!]  Borg connectivity FAILED — check passphrase/SSH key."
+    else
+      echo "  [--]  borg-passphrase-test.sh not installed (run backup setup first)."
+    fi
+  else
+    echo "  [--]  /root/.borg-repository not found (run backup setup first)."
+  fi
+
+  echo
   echo "UFW status (if installed):"
   if command -v ufw >/dev/null 2>&1; then
     ufw status verbose || true
