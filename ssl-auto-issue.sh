@@ -127,10 +127,20 @@ get_resolved_ip() {
 
 issue_ssl_for() {
   local domain="$1"
+  local output
 
   # Method 1: CyberPanel CLI (preferred, CyberPanel 2.x+)
+  # CyberPanel prints JSON: {"success": 1} on success, {"success": 0} on failure.
+  # Exit code alone is unreliable — must check the JSON "success" field.
   if command -v cyberpanel >/dev/null 2>&1; then
-    if cyberpanel issueSSL --domainName "$domain" 2>/dev/null; then
+    output="$(cyberpanel issueSSL --domainName "$domain" 2>&1 || true)"
+    echo "$output"
+    if echo "$output" | grep -q '"success"[[:space:]]*:[[:space:]]*1'; then
+      return 0
+    fi
+    # If CLI gave no JSON at all (older CyberPanel), treat non-empty success output as OK
+    if [[ -z "$(echo "$output" | grep -i '"success"')" ]] && \
+       echo "$output" | grep -qi "success\|issued\|completed"; then
       return 0
     fi
   fi
@@ -139,12 +149,85 @@ issue_ssl_for() {
   local CYBERCP_PY="/usr/local/CyberCP/bin/python"
   local CYBERCP_MG="/usr/local/CyberCP/manage.py"
   if [[ -f "$CYBERCP_PY" && -f "$CYBERCP_MG" ]]; then
-    if "$CYBERCP_PY" "$CYBERCP_MG" issueSSL --domainName "$domain" 2>/dev/null; then
+    output="$("$CYBERCP_PY" "$CYBERCP_MG" issueSSL --domainName "$domain" 2>&1 || true)"
+    echo "$output"
+    if echo "$output" | grep -q '"success"[[:space:]]*:[[:space:]]*1'; then
       return 0
     fi
   fi
 
   return 1
+}
+
+# -------------------------------------------------------------
+# Helper: issue SSL for the server hostname
+# cyberpanel issueSSL only works for registered CyberPanel websites;
+# the hostname is not a website so we use CyberPanel's own acme.sh.
+# -------------------------------------------------------------
+
+issue_ssl_hostname() {
+  local domain="$1"
+  local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+
+  # Skip if cert already exists and is not expiring within 30 days
+  if [[ -f "$cert_file" ]]; then
+    if openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
+      log "Cert for $domain already valid and not expiring soon — skipping."
+      return 0
+    fi
+    log "Cert for $domain exists but expiring soon — renewing..."
+  fi
+
+  # Find acme.sh (CyberPanel installs it for root)
+  local ACME=""
+  for candidate in \
+    /root/.acme.sh/acme.sh \
+    /usr/local/CyberCP/bin/acme.sh \
+    "$(command -v acme.sh 2>/dev/null || true)"
+  do
+    [[ -x "$candidate" ]] && { ACME="$candidate"; break; }
+  done
+
+  if [[ -z "$ACME" ]]; then
+    warn "acme.sh not found. Cannot issue hostname cert automatically."
+    warn "Issue SSL for the hostname manually via CyberPanel or certbot."
+    return 1
+  fi
+
+  mkdir -p "/etc/letsencrypt/live/${domain}"
+
+  # Method 1: webroot (preferred — no service interruption)
+  # OLS serves the default host at /usr/local/lsws/DEFAULT/html/
+  local WEBROOT="/usr/local/lsws/DEFAULT/html"
+  if [[ -d "$WEBROOT" ]]; then
+    log "Issuing hostname cert via acme.sh webroot (no service interruption)..."
+    mkdir -p "${WEBROOT}/.well-known/acme-challenge"
+    if "$ACME" --issue --webroot "$WEBROOT" -d "$domain" 2>&1; then
+      "$ACME" --installcert -d "$domain" \
+        --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
+        --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
+      [[ -f "$cert_file" ]] && return 0
+    fi
+  fi
+
+  # Method 2: standalone (stops OLS briefly if needed)
+  log "Trying acme.sh standalone for hostname cert (brief OLS pause)..."
+  local ols_was_running=false
+  if systemctl is-active --quiet lsws 2>/dev/null; then
+    ols_was_running=true
+    systemctl stop lsws
+  fi
+
+  local result=1
+  if "$ACME" --issue --standalone -d "$domain" 2>&1; then
+    "$ACME" --installcert -d "$domain" \
+      --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
+      --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
+    [[ -f "$cert_file" ]] && result=0
+  fi
+
+  $ols_was_running && systemctl start lsws
+  return $result
 }
 
 # -------------------------------------------------------------
@@ -162,13 +245,31 @@ for domain in "${ALL_DOMAINS[@]}"; do
   if ! resolves_here "$domain"; then
     resolved="$(get_resolved_ip "$domain")"
     warn "DNS mismatch: $domain resolves to $resolved, not $SERVER_IP — skipping."
-    warn "Point the domain's A record to $SERVER_IP and re-run to issue SSL."
+    if [[ "$resolved" == "172.67."* || "$resolved" == "104.21."* || "$resolved" == "172.64."* ]]; then
+      warn "This IP appears to be Cloudflare. If this domain uses Cloudflare proxy,"
+      warn "temporarily disable the orange cloud (DNS only) then re-run to issue SSL."
+    else
+      warn "Point the domain's A record to $SERVER_IP and re-run to issue SSL."
+    fi
     SKIPPED_DNS+=("$domain (resolves to: $resolved)")
     echo
     continue
   fi
 
   log "$domain → $SERVER_IP ✓  Proceeding with SSL issuance..."
+
+  # Hostname is not a CyberPanel website — use certbot directly
+  if [[ "$domain" == "$HOSTNAME_FQDN" ]]; then
+    if issue_ssl_hostname "$domain"; then
+      log "SSL issued successfully for $domain"
+      SUCCESS+=("$domain")
+    else
+      warn "SSL issuance failed for $domain"
+      FAILED+=("$domain")
+    fi
+    echo
+    continue
+  fi
 
   if issue_ssl_for "$domain"; then
     log "SSL issued successfully for $domain"

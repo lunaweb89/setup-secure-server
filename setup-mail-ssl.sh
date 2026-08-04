@@ -2,20 +2,34 @@
 #
 # setup-mail-ssl.sh
 #
-# Fixes SMTP/SSL mismatch on CyberPanel mail servers:
-#   - Configures Postfix TLS to use the server hostname SSL cert
-#   - Configures Dovecot SNI so each hosted domain presents its own
-#     SSL cert for IMAP/POP3 connections (fixes Outlook/Gmail cert warnings)
-#   - Ensures Dovecot LMTP delivery socket is active for Postfix
-#   - Enables LMTP in Dovecot protocols if not already set
+# Fixes SMTP/SSL mismatch on CyberPanel mail servers.
 #
-# Safe for CyberPanel:
-#   - Uses `postconf -e` (non-destructive, CyberPanel-compatible)
-#   - Writes SNI/SSL overrides to /etc/dovecot/conf.d/99-* drop-in files,
-#     not CyberPanel-managed files
-#   - Safe to re-run: regenerates SNI map each time (picks up new certs)
+# Root cause:
+#   CyberPanel manages Postfix and Dovecot cert via symlinks:
+#     /etc/postfix/cert.pem  → last domain cert issued via CyberPanel
+#     /etc/dovecot/cert.pem  → same
+#   After issuing SSL for multiple sites the symlinks point to
+#   the LAST domain issued, not the server hostname. Postfix then
+#   presents that domain's cert during SMTP TLS, causing Outlook/
+#   Hotmail to reject mail with a "certificate mismatch" error.
 #
-# Run AFTER ssl-auto-issue.sh so all domain certs already exist.
+# What this script does:
+#   1. Redirects /etc/postfix/cert.pem and /etc/dovecot/cert.pem
+#      to the server HOSTNAME cert (the correct TLS identity for SMTP)
+#   2. Applies modern TLS settings to Postfix for Outlook compatibility
+#   3. Reports how many per-domain Dovecot SNI entries CyberPanel has
+#      already configured in /etc/dovecot/dovecot.conf
+#
+# What this script deliberately does NOT touch:
+#   - virtual_transport — CyberPanel uses "dovecot" LDA pipe, not LMTP;
+#     changing this would break mail delivery
+#   - /etc/dovecot/conf.d/ — CyberPanel's dovecot.conf does not include
+#     that directory; drop-in files there are never loaded
+#   - /etc/dovecot/dovecot.conf — CyberPanel actively manages this file
+#     and appends local_name SNI blocks automatically when you issue SSL
+#     per domain via the panel; do not manually edit it
+#
+# Run AFTER ssl-auto-issue.sh so the hostname cert already exists.
 #
 # Usage:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/lunaweb89/setup-secure-server/main/setup-mail-ssl.sh)
@@ -39,7 +53,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo
 echo "============================================================"
-echo "  LunaServers – Mail SSL Fix"
+echo "  LunaServers – Mail SSL Fix (CyberPanel)"
 echo "  Started: $(date -Is)"
 echo "============================================================"
 echo
@@ -59,192 +73,137 @@ done
 if [[ -z "${SERVER_HOSTNAME:-}" ]]; then
   SERVER_HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
 fi
-
 log "Mail server hostname: $SERVER_HOSTNAME"
 
 # -------------------------------------------------------------
 # Verify Postfix and Dovecot are installed (CyberPanel provides these)
 # -------------------------------------------------------------
 
-if ! command -v postfix >/dev/null 2>&1 && ! command -v postconf >/dev/null 2>&1; then
-  err "Postfix is not installed. Is CyberPanel installed on this server?"
+for bin in postconf dovecot; do
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    err "$bin is not installed. Is CyberPanel installed on this server?"
+    exit 1
+  fi
+done
+
+# -------------------------------------------------------------
+# Locate hostname SSL cert
+# CyberPanel (acme.sh) stores certs at /etc/letsencrypt/live/<domain>/
+# -------------------------------------------------------------
+
+HOSTNAME_CERT="/etc/letsencrypt/live/${SERVER_HOSTNAME}/fullchain.pem"
+HOSTNAME_KEY="/etc/letsencrypt/live/${SERVER_HOSTNAME}/privkey.pem"
+
+if [[ ! -f "$HOSTNAME_CERT" || ! -f "$HOSTNAME_KEY" ]]; then
+  err "No SSL cert found for $SERVER_HOSTNAME at:"
+  err "  $HOSTNAME_CERT"
+  err ""
+  err "Run ssl-auto-issue.sh first (option 7 in the toolkit)."
+  err "It will issue the hostname cert and certs for all CyberPanel sites."
   exit 1
 fi
 
-if ! command -v dovecot >/dev/null 2>&1; then
-  err "Dovecot is not installed. Is CyberPanel installed on this server?"
+log "Hostname cert found: $HOSTNAME_CERT"
+
+# Verify the cert is not already expired
+if ! openssl x509 -checkend 0 -noout -in "$HOSTNAME_CERT" 2>/dev/null; then
+  err "The hostname cert at $HOSTNAME_CERT is EXPIRED."
+  err "Re-run ssl-auto-issue.sh to renew it, then retry."
   exit 1
 fi
 
 # -------------------------------------------------------------
-# Find hostname SSL cert
-# CyberPanel (acme.sh) and certbot both use /etc/letsencrypt/live/
+# Update CyberPanel's cert symlinks to point to the hostname cert
+#
+# CyberPanel creates these symlinks and updates them to whatever
+# domain cert was last issued. We redirect them to the hostname cert
+# so Postfix and Dovecot present the correct TLS identity for SMTP.
 # -------------------------------------------------------------
 
-HOSTNAME_CERT=""
-HOSTNAME_KEY=""
+log "Updating Postfix cert symlinks → hostname cert..."
+mkdir -p /etc/postfix
+ln -sf "$HOSTNAME_CERT" /etc/postfix/cert.pem
+ln -sf "$HOSTNAME_KEY"  /etc/postfix/key.pem
 
-LE_CERT="/etc/letsencrypt/live/${SERVER_HOSTNAME}/fullchain.pem"
-LE_KEY="/etc/letsencrypt/live/${SERVER_HOSTNAME}/privkey.pem"
+log "Updating Dovecot cert symlinks → hostname cert..."
+mkdir -p /etc/dovecot
+ln -sf "$HOSTNAME_CERT" /etc/dovecot/cert.pem
+ln -sf "$HOSTNAME_KEY"  /etc/dovecot/key.pem
 
-if [[ -f "$LE_CERT" && -f "$LE_KEY" ]]; then
-  HOSTNAME_CERT="$LE_CERT"
-  HOSTNAME_KEY="$LE_KEY"
-  log "Found hostname cert: $HOSTNAME_CERT"
-else
-  warn "No SSL cert found for $SERVER_HOSTNAME at $LE_CERT"
-  warn "Run ssl-auto-issue.sh first to issue certs, then re-run this script."
-  warn "Using self-signed snakeoil cert as fallback (mail will work but"
-  warn "clients will see a certificate warning until a real cert is issued)."
-  apt-get install -y -qq ssl-cert >/dev/null 2>&1 || true
-  HOSTNAME_CERT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
-  HOSTNAME_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
+# CyberPanel also maintains symlinks under /etc/pki/dovecot on some installs
+if [[ -d /etc/pki/dovecot ]] || [[ -d /etc/pki ]]; then
+  mkdir -p /etc/pki/dovecot/certs /etc/pki/dovecot/private
+  ln -sf "$HOSTNAME_CERT" /etc/pki/dovecot/certs/dovecot.pem
+  ln -sf "$HOSTNAME_KEY"  /etc/pki/dovecot/private/dovecot.pem
+  log "Updated /etc/pki/dovecot symlinks → hostname cert."
 fi
 
+log "Cert symlinks updated. Postfix and Dovecot will now use: $SERVER_HOSTNAME"
+
 # -------------------------------------------------------------
-# Configure Postfix TLS
-# postconf -e is safe with CyberPanel — it edits main.cf directly
+# Configure Postfix TLS via postconf -e
+#
+# postconf -e edits main.cf in place and is CyberPanel-compatible.
+# We ONLY touch TLS-related settings.
+# virtual_transport is left as-is ("dovecot" LDA pipe).
 # -------------------------------------------------------------
 
-log "Configuring Postfix TLS..."
+log "Configuring Postfix TLS settings..."
 
 postconf -e "myhostname = ${SERVER_HOSTNAME}"
-
-# TLS on inbound SMTP (smtpd = server mode, used by receiving clients)
+postconf -e "smtpd_tls_cert_file = /etc/postfix/cert.pem"
+postconf -e "smtpd_tls_key_file = /etc/postfix/key.pem"
 postconf -e "smtpd_tls_security_level = may"
 postconf -e "smtpd_tls_auth_only = yes"
-postconf -e "smtpd_tls_cert_file = ${HOSTNAME_CERT}"
-postconf -e "smtpd_tls_key_file = ${HOSTNAME_KEY}"
 postconf -e "smtpd_tls_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
 postconf -e "smtpd_tls_mandatory_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
 postconf -e "smtpd_tls_mandatory_ciphers = high"
 postconf -e "smtpd_tls_loglevel = 1"
-
-# TLS on outbound SMTP (smtp = client mode, used when sending to other servers)
 postconf -e "smtp_tls_security_level = may"
 postconf -e "smtp_tls_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
 postconf -e "smtp_tls_loglevel = 1"
 
-# Route incoming mail through Dovecot LMTP for delivery to mailboxes
-postconf -e "virtual_transport = lmtp:unix:private/dovecot-lmtp"
-
 log "Postfix TLS configured."
+log "  smtpd_tls_cert_file → /etc/postfix/cert.pem → $SERVER_HOSTNAME cert"
+log "  virtual_transport    → $(postconf -h virtual_transport 2>/dev/null || echo '(not set)') [unchanged]"
 
 # -------------------------------------------------------------
-# Ensure LMTP is enabled in Dovecot protocols
-# CyberPanel usually enables this, but verify
+# Report Dovecot SNI status
+#
+# CyberPanel adds "local_name mail.<domain> { ... }" blocks to
+# /etc/dovecot/dovecot.conf automatically when you issue SSL for
+# a site via the panel. We do not edit dovecot.conf — CyberPanel
+# owns that file and overwrites it. Just report what's there.
 # -------------------------------------------------------------
 
-DOVECOT_MAIN_CONF="/etc/dovecot/dovecot.conf"
-if [[ -f "$DOVECOT_MAIN_CONF" ]]; then
-  if grep -q "^protocols" "$DOVECOT_MAIN_CONF"; then
-    if ! grep "^protocols" "$DOVECOT_MAIN_CONF" | grep -q "lmtp"; then
-      log "Adding lmtp to Dovecot protocols..."
-      sed -i 's/^protocols = .*/& lmtp/' "$DOVECOT_MAIN_CONF"
-    else
-      log "LMTP already in Dovecot protocols."
+DOVECOT_CONF="/etc/dovecot/dovecot.conf"
+SNI_COUNT=0
+SNI_DOMAINS=()
+
+if [[ -f "$DOVECOT_CONF" ]]; then
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^local_name[[:space:]]+(.*)[[:space:]]*\{ ]]; then
+      SNI_DOMAINS+=("${BASH_REMATCH[1]// /}")
+      SNI_COUNT=$(( SNI_COUNT + 1 ))
     fi
-  else
-    log "Appending protocols line to dovecot.conf..."
-    echo "protocols = imap pop3 lmtp" >> "$DOVECOT_MAIN_CONF"
-  fi
+  done < "$DOVECOT_CONF"
 fi
 
-# -------------------------------------------------------------
-# Ensure Dovecot LMTP unix socket listener exists for Postfix
-# Write to a drop-in file; does not touch CyberPanel's 10-master.conf
-# -------------------------------------------------------------
-
-DOVECOT_LMTP_CONF="/etc/dovecot/conf.d/99-lmtp-postfix.conf"
-
-if grep -rq "dovecot-lmtp" /etc/dovecot/conf.d/ 2>/dev/null || \
-   grep -q "dovecot-lmtp" /etc/dovecot/dovecot.conf 2>/dev/null; then
-  log "Dovecot LMTP listener already configured."
+echo
+log "Dovecot SNI status (local_name blocks in $DOVECOT_CONF):"
+if (( SNI_COUNT == 0 )); then
+  warn "  No SNI entries found. Dovecot will use the hostname cert for all"
+  warn "  IMAP/POP3 connections. This is OK but clients connecting as"
+  warn "  mail.example.com will see the hostname cert, not example.com's cert."
+  warn "  To add per-domain SNI: issue SSL for each domain via CyberPanel"
+  warn "  panel → SSL → Manage SSL → Issue SSL. CyberPanel writes the SNI"
+  warn "  block to dovecot.conf automatically."
 else
-  log "Adding Dovecot LMTP listener for Postfix..."
-  cat > "$DOVECOT_LMTP_CONF" << 'LMTPEOF'
-# Postfix → Dovecot LMTP delivery socket
-# Written by setup-mail-ssl.sh; safe to re-run
-service lmtp {
-  unix_listener /var/spool/postfix/private/dovecot-lmtp {
-    mode = 0600
-    user = postfix
-    group = postfix
-  }
-}
-LMTPEOF
-  chmod 640 "$DOVECOT_LMTP_CONF"
-  log "LMTP listener written to $DOVECOT_LMTP_CONF"
+  for d in "${SNI_DOMAINS[@]}"; do
+    log "  SNI: $d"
+  done
+  log "  Total: $SNI_COUNT domain(s)"
 fi
-
-# -------------------------------------------------------------
-# Write Dovecot SNI override (drop-in, loaded last)
-# Maps each domain to its own SSL cert for IMAP/POP3 connections
-# This is what fixes the Outlook "certificate mismatch" error
-# -------------------------------------------------------------
-
-log "Generating Dovecot SNI mapping..."
-
-DOVECOT_SNI_CONF="/etc/dovecot/conf.d/99-sni-override.conf"
-
-# Build SNI config header
-cat > "$DOVECOT_SNI_CONF" << DOVEEOF
-# Auto-generated by setup-mail-ssl.sh — $(date -Is)
-# Re-run setup-mail-ssl.sh after issuing certs for new domains.
-
-# Default SSL cert: server hostname cert
-ssl = required
-ssl_cert = <${HOSTNAME_CERT}
-ssl_key  = <${HOSTNAME_KEY}
-ssl_min_protocol = TLSv1.2
-ssl_cipher_list = HIGH:!aNULL:!MD5
-ssl_prefer_server_ciphers = yes
-
-DOVEEOF
-
-# Add DH params if the file exists (Dovecot 2.2 and some 2.3 builds need this)
-if [[ -f /usr/share/dovecot/dh.pem ]]; then
-  echo "ssl_dh = </usr/share/dovecot/dh.pem" >> "$DOVECOT_SNI_CONF"
-  echo >> "$DOVECOT_SNI_CONF"
-fi
-
-cat >> "$DOVECOT_SNI_CONF" << 'SNIHEADER'
-# Per-domain SNI: when a mail client connects using mail.example.com,
-# Dovecot presents example.com's cert instead of the hostname cert.
-# This eliminates the "certificate mismatch" warning in Outlook/Thunderbird.
-SNIHEADER
-
-CERT_COUNT=0
-SKIPPED=0
-
-for domain_path in /etc/letsencrypt/live/*/; do
-  domain=$(basename "$domain_path")
-  [[ "$domain" == "README" ]] && continue
-
-  cert="${domain_path}fullchain.pem"
-  key="${domain_path}privkey.pem"
-
-  if [[ ! -f "$cert" || ! -f "$key" ]]; then
-    SKIPPED=$(( SKIPPED + 1 ))
-    continue
-  fi
-
-  cat >> "$DOVECOT_SNI_CONF" << SNIEOF
-
-local_name ${domain} {
-  ssl_cert = <${cert}
-  ssl_key  = <${key}
-}
-SNIEOF
-
-  CERT_COUNT=$(( CERT_COUNT + 1 ))
-  log "  SNI mapped: $domain"
-done
-
-chown root:root "$DOVECOT_SNI_CONF"
-chmod 640 "$DOVECOT_SNI_CONF"
-
-log "Dovecot SNI: $CERT_COUNT domain(s) mapped, $SKIPPED skipped (cert files incomplete)."
 
 # -------------------------------------------------------------
 # Restart services
@@ -256,26 +215,13 @@ systemctl restart postfix
 log "Restarting Dovecot..."
 systemctl restart dovecot
 
-# -------------------------------------------------------------
-# Verify services are up
-# -------------------------------------------------------------
-
 log "Verifying services..."
-SERVICES_OK=true
-
-if systemctl is-active --quiet postfix; then
-  log "  Postfix: running"
-else
-  warn "  Postfix: NOT running — check: journalctl -xeu postfix"
-  SERVICES_OK=false
-fi
-
-if systemctl is-active --quiet dovecot; then
-  log "  Dovecot: running"
-else
-  warn "  Dovecot: NOT running — check: journalctl -xeu dovecot"
-  SERVICES_OK=false
-fi
+systemctl is-active --quiet postfix \
+  && log "  Postfix: running" \
+  || warn "  Postfix: NOT running — check: journalctl -xeu postfix"
+systemctl is-active --quiet dovecot \
+  && log "  Dovecot: running" \
+  || warn "  Dovecot: NOT running — check: journalctl -xeu dovecot"
 
 touch /root/.mail_ssl_setup_last_run 2>/dev/null || true
 
@@ -289,35 +235,40 @@ echo "  Mail SSL Fix — Summary"
 echo "  Completed: $(date -Is)"
 echo "============================================================"
 echo
-echo "  Hostname cert:     ${HOSTNAME_CERT}"
-echo "  SNI domains mapped: ${CERT_COUNT}"
-echo "  Postfix/Dovecot:   $(${SERVICES_OK} && echo 'both running' || echo 'CHECK LOGS')"
+echo "  Hostname:          $SERVER_HOSTNAME"
+echo "  Hostname cert:     $HOSTNAME_CERT"
+echo "  Postfix TLS:       /etc/postfix/cert.pem → hostname cert"
+echo "  Dovecot default:   /etc/dovecot/cert.pem → hostname cert"
+echo "  Dovecot SNI:       $SNI_COUNT domain(s) (managed by CyberPanel)"
 echo
 echo "------------------------------------------------------------"
-echo "  MANUAL STEPS — required to fix Outlook rejection"
+echo "  MANUAL STEPS — required for Outlook/Gmail deliverability"
 echo "------------------------------------------------------------"
 echo
-echo "  1. REVERSE DNS (PTR record) — MOST IMPORTANT"
-echo "     Your server IP must reverse-resolve to: $SERVER_HOSTNAME"
-echo "     Set this in Hetzner Console → Networking → IP → PTR record"
-echo "     Without this, Outlook/Hotmail WILL reject your mail."
+echo "  1. REVERSE DNS (PTR) — MOST CRITICAL for Outlook"
+echo "     Your server IP must resolve back to: $SERVER_HOSTNAME"
+echo "     Set in Hetzner Console → Servers → IP Addresses → PTR"
+echo "     Without this, Outlook/Hotmail will reject your mail."
 echo
-echo "  2. SPF record — for each domain sending email:"
-echo "     Type: TXT   Name: @   Value: v=spf1 ip4:<your-server-ip> ~all"
+echo "  2. Per-domain Dovecot SNI (fixes client cert warnings):"
+echo "     For each hosted domain, issue SSL via CyberPanel:"
+echo "     CyberPanel → SSL → Manage SSL → Issue SSL → <domain>"
+echo "     CyberPanel automatically adds the SNI block to Dovecot."
+echo "     Then re-run this script to verify the count."
 echo
-echo "  3. DKIM — enable per domain in CyberPanel:"
-echo "     CyberPanel → Email → DKIM Manager → select domain → Add DKIM"
-echo "     Then add the TXT record shown to your domain's DNS."
+echo "  3. SPF — for each domain sending email:"
+echo "     DNS TXT @ → v=spf1 ip4:<server-ip> ~all"
 echo
-echo "  4. DMARC — for each domain:"
-echo "     Type: TXT   Name: _dmarc   Value: v=DMARC1; p=quarantine; rua=mailto:postmaster@<domain>"
+echo "  4. DKIM — via CyberPanel:"
+echo "     CyberPanel → Email → DKIM Manager → Enable DKIM for domain"
+echo "     Copy the TXT record and add to your DNS."
 echo
-echo "  5. TEST your mail reputation:"
-echo "     https://mail-tester.com  (send a test email, aim for 10/10)"
-echo "     https://mxtoolbox.com/SuperTool.aspx (check blacklists, MX, SPF)"
+echo "  5. DMARC — for each domain:"
+echo "     DNS TXT _dmarc → v=DMARC1; p=quarantine; rua=mailto:postmaster@<domain>"
 echo
-echo "  6. RE-RUN this script after issuing SSL for new domains"
-echo "     (updates the Dovecot SNI map automatically)"
+echo "  6. Test deliverability:"
+echo "     https://mail-tester.com       (send a test, aim for 10/10)"
+echo "     https://mxtoolbox.com/SuperTool.aspx  (check blacklists, MX, SPF)"
 echo
 echo "  Log: $LOG_FILE"
 echo "============================================================"
