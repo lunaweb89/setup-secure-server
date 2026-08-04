@@ -196,6 +196,9 @@ chmod 750 "$POSTFIX_SNI_DIR"
 > "$POSTFIX_SNI_MAP"
 POSTFIX_SNI_COUNT=0
 
+# Track which domains were successfully mapped (key = domain, value = combined PEM path)
+declare -A SNI_MAPPED_PEM
+
 for domain_path in /etc/letsencrypt/live/*/; do
   domain=$(basename "$domain_path")
   [[ "$domain" == "README" ]] && continue
@@ -204,19 +207,53 @@ for domain_path in /etc/letsencrypt/live/*/; do
   key="${domain_path}privkey.pem"
   [[ -f "$cert" && -f "$key" ]] || continue
 
-  # Skip expired certs silently
+  # Skip expired certs
   if ! openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null; then
     warn "  Skipping expired cert: $domain"
     continue
   fi
 
-  # Postfix SNI needs key + fullchain concatenated in one PEM file
+  # Postfix SNI needs key + fullchain concatenated in one PEM file (key first)
   combined="${POSTFIX_SNI_DIR}/${domain}.pem"
   cat "$key" "$cert" > "$combined"
   chmod 640 "$combined"
 
+  # Validate the combined PEM — a bad file causes Postfix to send tlsv1 alert internal_error
+  if ! openssl x509 -noout -in "$combined" 2>/dev/null; then
+    warn "  Combined PEM invalid for $domain (cert unreadable) — skipping"
+    rm -f "$combined"
+    continue
+  fi
+
   echo "${domain} ${combined}" >> "$POSTFIX_SNI_MAP"
+  SNI_MAPPED_PEM["$domain"]="$combined"
   log "  Postfix SNI mapped: $domain"
+  POSTFIX_SNI_COUNT=$(( POSTFIX_SNI_COUNT + 1 ))
+done
+
+# Ensure mail.<domain> is in the SNI map for every bare domain.
+#
+# WordPress SMTP connects to mail.<domain>:587 and sends SNI=mail.<domain>.
+# Postfix does an EXACT lookup — if only <domain> is in the map, it misses,
+# falls back to the hostname cert, and the client gets a cert mismatch error.
+#
+# If CyberPanel issued a dedicated cert for mail.<domain> it is already mapped
+# above. If not (or if that cert was corrupted/skipped), we add a fallback
+# entry pointing to the bare domain's cert so Postfix can at least serve
+# a valid cert for the SNI lookup.
+for domain in "${!SNI_MAPPED_PEM[@]}"; do
+  # Only process bare domains (e.g. example.com, not mail.example.com)
+  [[ "$domain" == mail.* || "$domain" == www.* || "$domain" == smtp.* ]] && continue
+  dots="${domain//[^.]/}"
+  [[ "${#dots}" -ne 1 ]] && continue  # skip multi-level subdomains
+
+  mail_key="mail.${domain}"
+  # Skip if mail.<domain> already has its own entry (dedicated cert, mapped above)
+  [[ -n "${SNI_MAPPED_PEM[$mail_key]+x}" ]] && continue
+
+  combined="${SNI_MAPPED_PEM[$domain]}"
+  echo "${mail_key} ${combined}" >> "$POSTFIX_SNI_MAP"
+  log "  Postfix SNI also mapped: mail.${domain} → ${domain} cert"
   POSTFIX_SNI_COUNT=$(( POSTFIX_SNI_COUNT + 1 ))
 done
 
@@ -225,7 +262,7 @@ chmod 640 "$POSTFIX_SNI_MAP"
 if (( POSTFIX_SNI_COUNT > 0 )); then
   postmap hash:"$POSTFIX_SNI_MAP"
   postconf -e "tls_server_sni_maps = hash:${POSTFIX_SNI_MAP}"
-  log "Postfix SNI: $POSTFIX_SNI_COUNT domain(s) mapped."
+  log "Postfix SNI: $POSTFIX_SNI_COUNT entry(ies) mapped."
   log "  WordPress SMTP can now use mail.<domain>:587 with correct cert per domain."
 else
   warn "No domain certs found for SNI map — hostname cert will be used for all connections."

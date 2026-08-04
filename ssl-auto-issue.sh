@@ -351,6 +351,7 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
   mkdir -p "$POSTFIX_SNI_DIR"
   > "$POSTFIX_SNI_MAP"
   SNI_REBUILT=0
+  declare -A _SNI_PEM
   for domain_path in /etc/letsencrypt/live/*/; do
     domain=$(basename "$domain_path")
     [[ "$domain" == "README" ]] && continue
@@ -361,13 +362,24 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
     combined="${POSTFIX_SNI_DIR}/${domain}.pem"
     cat "$key" "$cert" > "$combined"
     chmod 640 "$combined"
+    openssl x509 -noout -in "$combined" 2>/dev/null || { rm -f "$combined"; continue; }
     echo "${domain} ${combined}" >> "$POSTFIX_SNI_MAP"
+    _SNI_PEM["$domain"]="$combined"
+    SNI_REBUILT=$(( SNI_REBUILT + 1 ))
+  done
+  # Add mail.<domain> fallback entries for bare domains that have no dedicated cert
+  for domain in "${!_SNI_PEM[@]}"; do
+    [[ "$domain" == mail.* || "$domain" == www.* || "$domain" == smtp.* ]] && continue
+    dots="${domain//[^.]/}"; [[ "${#dots}" -ne 1 ]] && continue
+    mail_key="mail.${domain}"
+    [[ -n "${_SNI_PEM[$mail_key]+x}" ]] && continue
+    echo "${mail_key} ${_SNI_PEM[$domain]}" >> "$POSTFIX_SNI_MAP"
     SNI_REBUILT=$(( SNI_REBUILT + 1 ))
   done
   chmod 640 "$POSTFIX_SNI_MAP"
   postmap hash:"$POSTFIX_SNI_MAP"
   systemctl reload postfix 2>/dev/null || systemctl restart postfix 2>/dev/null || true
-  log "Postfix SNI map rebuilt: $SNI_REBUILT domain(s). Postfix reloaded."
+  log "Postfix SNI map rebuilt: $SNI_REBUILT entry(ies). Postfix reloaded."
 fi
 
 log "Done."

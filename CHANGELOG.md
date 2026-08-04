@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.1] – 2026-08-04
+
+### Fixed
+
+**`setup-mail-ssl.sh`**
+- **Root cause of `tlsv1 alert internal error`**: Postfix SNI map only had bare domain keys (`example.com`) but WordPress SMTP sends SNI=`mail.example.com` when connecting to `mail.example.com:587`. Postfix did an exact lookup, missed, and if a corrupted `mail.example.com` cert existed in `/etc/letsencrypt/live/` it would fail loading it and send an `internal_error` TLS alert to the client.
+- Added `mail.<domain>` fallback entries for every bare domain that has no dedicated mail cert — Postfix now correctly serves the domain cert when the client connects via `mail.<domain>:587`
+- Added combined PEM validation (`openssl x509 -noout`) after creation — a bad PEM file is detected and skipped rather than causing Postfix to send `tlsv1 alert internal_error` to all connecting clients
+- `SNI_MAPPED_PEM` associative array tracks successful entries to avoid duplicate `mail.*` entries when CyberPanel already issued a valid dedicated cert for `mail.<domain>`
+
+**`ssl-auto-issue.sh`**
+- Same `mail.<domain>` fallback and combined PEM validation logic applied to the nightly SNI map rebuild block that runs after cert renewal
+
+---
+
 ## [1.3.0] – 2026-08-04
 
 ### Added
