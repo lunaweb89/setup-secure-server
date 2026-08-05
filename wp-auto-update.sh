@@ -23,6 +23,14 @@ log()  { echo "[+] $*"; }
 warn() { echo "[-] $*"; }
 err()  { echo "[ERROR] $*" >&2; }
 
+# Safe mode: skip major version bumps (e.g. WooCommerce 8→9, Elementor 3→4).
+# Major updates can introduce breaking changes and should be reviewed manually.
+# Default: ON (safe). Pass --all to include major updates.
+SAFE_MODE=true
+for arg in "$@"; do
+  [[ "$arg" == "--all" ]] && SAFE_MODE=false
+done
+
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   err "This script must be run as root (sudo)."
   exit 1
@@ -125,19 +133,67 @@ for config_path in "${WP_CONFIGS[@]}"; do
   fi
 
   # --- Update WordPress core ---
-  log "  Updating core..."
-  "$WP_CLI" core update --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
-
-  # Also update the WordPress database schema if core was updated
+  # Safe mode: --minor only applies security/minor releases (e.g. 6.5.4 → 6.5.5).
+  # Full mode: updates to the latest major release too (e.g. 6.5 → 6.6).
+  if $SAFE_MODE; then
+    log "  Updating core (minor/security only)..."
+    "$WP_CLI" core update --minor --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  else
+    log "  Updating core (all versions)..."
+    "$WP_CLI" core update --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  fi
   "$WP_CLI" core update-db --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
 
   # --- Update plugins ---
+  # Safe mode: skip any plugin whose major version number changes (X.y.z → X+1.y.z).
+  # Those are reviewed and updated manually. Minor/patch updates apply automatically.
   log "  Updating plugins..."
-  "$WP_CLI" plugin update --all --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  local plugin_skipped=()
+  if $SAFE_MODE; then
+    while IFS=',' read -r name cur_ver new_ver; do
+      [[ "$name" == "name" || -z "${name:-}" ]] && continue
+      cur_major="${cur_ver%%.*}"
+      new_major="${new_ver%%.*}"
+      if [[ "$cur_major" != "$new_major" ]]; then
+        warn "  SKIP plugin (major update: $name $cur_ver → $new_ver — update manually)"
+        plugin_skipped+=("$name ($cur_ver → $new_ver)")
+      else
+        "$WP_CLI" plugin update "$name" --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+      fi
+    done < <("$WP_CLI" plugin list --update=available \
+        --fields=name,version,update_version --format=csv \
+        --path="$install_dir" --allow-root 2>/dev/null || true)
+  else
+    "$WP_CLI" plugin update --all --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  fi
 
   # --- Update themes ---
   log "  Updating themes..."
-  "$WP_CLI" theme update --all --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  local theme_skipped=()
+  if $SAFE_MODE; then
+    while IFS=',' read -r name cur_ver new_ver; do
+      [[ "$name" == "name" || -z "${name:-}" ]] && continue
+      cur_major="${cur_ver%%.*}"
+      new_major="${new_ver%%.*}"
+      if [[ "$cur_major" != "$new_major" ]]; then
+        warn "  SKIP theme (major update: $name $cur_ver → $new_ver — update manually)"
+        theme_skipped+=("$name ($cur_ver → $new_ver)")
+      else
+        "$WP_CLI" theme update "$name" --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+      fi
+    done < <("$WP_CLI" theme list --update=available \
+        --fields=name,version,update_version --format=csv \
+        --path="$install_dir" --allow-root 2>/dev/null || true)
+  else
+    "$WP_CLI" theme update --all --path="$install_dir" --allow-root 2>&1 | sed 's/^/    /' || true
+  fi
+
+  if (( ${#plugin_skipped[@]} + ${#theme_skipped[@]} > 0 )); then
+    warn "  Major updates skipped (safe mode — update these manually):"
+    for s in "${plugin_skipped[@]}" "${theme_skipped[@]}"; do
+      printf "    [--] %s\n" "$s"
+    done
+  fi
 
   # --- Post-update HTTP check ---
   log "  Checking HTTP response..."

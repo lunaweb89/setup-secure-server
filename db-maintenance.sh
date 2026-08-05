@@ -73,11 +73,11 @@ echo "============================================================"
 for db in "${USER_DBS[@]}"; do
   [[ -z "${db:-}" ]] && continue
   log "  $db"
+  # InnoDB always says "note: Table does not support optimize, doing recreate + analyze instead"
+  # followed by "status: OK" — both are normal and suppressed; only actual problems are shown.
   mysqlcheck -u root -p"$MYSQL_PW" --optimize --auto-repair "$db" 2>&1 \
-    | grep -v "^$" | grep -Ev "^$db\." | sed 's/^/    /' || true
-  # Print only problems; skip "OK" lines to keep output concise
-  mysqlcheck -u root -p"$MYSQL_PW" --optimize "$db" 2>&1 \
-    | grep -v " OK$" | grep -v "^$" | sed 's/^/    /' || true
+    | grep -Ev "^\s*$| OK$|note: Table does not support optimize" \
+    | sed 's/^/    /' || true
 done
 
 # ---------------------------------------------------------------

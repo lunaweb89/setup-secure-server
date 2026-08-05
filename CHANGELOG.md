@@ -5,6 +5,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.1] – 2026-08-05
+
+### Fixed
+
+**`wp-auto-update.sh`**
+- Added `--safe` / safe mode (default ON): core updates limited to minor/security releases only (`wp core update --minor`); plugins and themes skip any update where the major version number changes (e.g. WooCommerce 8→9). Major updates are flagged in the log for manual review. Pass `--all` to include major updates.
+- Weekly cron runs in safe mode by default (no `--all` flag)
+
+**`db-maintenance.sh`**
+- Eliminated duplicate `mysqlcheck` call (was running twice per database)
+- Suppressed normal InnoDB output: "note: Table does not support optimize, doing recreate + analyze instead" and "status: OK" are filtered — only actual errors and warnings are shown
+- Log output is now concise enough for unattended weekly cron use
+
+---
+
 ## [1.4.0] – 2026-08-05
 
 ### Added
