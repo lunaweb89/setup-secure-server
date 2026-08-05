@@ -231,6 +231,15 @@ issue_ssl_hostname() {
   if systemctl is-active --quiet lsws 2>/dev/null; then
     ols_was_running=true
     systemctl stop lsws
+    # OLS worker processes hold port 80 briefly after the service stops.
+    # Wait up to 15s for port 80 to be free before handing it to acme.sh.
+    local _w=0
+    while ss -tlnp 2>/dev/null | grep -q ':80 ' && (( _w < 15 )); do
+      sleep 1; _w=$(( _w + 1 ))
+    done
+    if (( _w > 0 )); then
+      log "Waited ${_w}s for OLS to release port 80."
+    fi
   fi
 
   local result=1
