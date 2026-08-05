@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.0] – 2026-08-05
+
+### Added
+
+**`check-mail-health.sh`** (new script — option 9)
+- Checks email deliverability for every CyberPanel domain via pure DNS (`dig`) queries — no external APIs
+- PTR / reverse DNS match against server hostname
+- IP blacklist check against 5 major DNSBLs: Spamhaus zen, Barracuda, SpamCop, SORBS, CBL
+- Per-domain: MX, SPF (`v=spf1`), DKIM (`default._domainkey`), DMARC (`_dmarc`)
+- SSL cert expiry for `mail.<domain>` (dedicated) or fallback bare domain cert
+- Logs to `/var/log/mail-health-check.log`
+
+**`wp-auto-update.sh`** (new script — option 10)
+- Updates WordPress core, plugins, and themes across all installs under `/home/`
+- Pre-update compressed MySQL dump saved to `/root/wp-update-backups/` before each site
+- Post-update HTTP check (200/301/302); flags failures with the restore command
+- WP-CLI auto-installed to `/usr/local/bin/wp` if not present
+- Backups older than 7 days pruned automatically
+- Installs a weekly cron (`/etc/cron.d/weekly-wp-updates`, Monday 03:00) on first run
+- Logs to `/var/log/wp-auto-update.log`
+
+**`db-maintenance.sh`** (new script — option 11)
+- Runs `mysqlcheck --optimize --auto-repair` on all user MariaDB databases
+- Reports total size per database and top 15 largest tables
+- Identifies orphaned databases (no matching `websiteFunctions_websites` row in CyberPanel)
+- Reports slow query log status and last 3 slow queries if logging is enabled
+- Installs a weekly cron (`/etc/cron.d/weekly-db-maintenance`, Sunday 04:00) on first run
+- Logs to `/var/log/db-maintenance.log`
+
+**`server-toolkit.sh`**
+- Options 9, 10, 11 added for the three new scripts
+- Exit shifted from option 9 to **option 12**
+- `show_status()` now tracks `.wp_auto_update_last_run` and `.db_maintenance_last_run` markers
+- Cron status check extended: `daily-ssl-renew`, `weekly-wp-updates`, `weekly-db-maintenance`
+- Menu prompt updated to `[1-12]`
+
+---
+
 ## [1.3.4] – 2026-08-05
 
 ### Fixed / Added

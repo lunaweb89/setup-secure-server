@@ -10,6 +10,9 @@
 #   - server-optimizer-rollback.sh    (rollback optimizer changes)
 #   - ssl-auto-issue.sh               (issue & auto-renew SSL certs)
 #   - setup-mail-ssl.sh               (fix SMTP/SSL mismatch, Dovecot SNI)
+#   - check-mail-health.sh            (SPF/DKIM/DMARC/DNSBL checks)
+#   - wp-auto-update.sh               (update WordPress core/plugins/themes)
+#   - db-maintenance.sh               (optimize MariaDB, report orphans)
 #
 
 set -euo pipefail
@@ -53,6 +56,21 @@ run_mail_ssl_fix() {
   bash <(curl -fsSL "${BASE_URL}/setup-mail-ssl.sh")
 }
 
+run_mail_health_check() {
+  log "Starting mail deliverability health check..."
+  bash <(curl -fsSL "${BASE_URL}/check-mail-health.sh")
+}
+
+run_wp_auto_update() {
+  log "Starting WordPress auto-updater..."
+  bash <(curl -fsSL "${BASE_URL}/wp-auto-update.sh")
+}
+
+run_db_maintenance() {
+  log "Starting database maintenance..."
+  bash <(curl -fsSL "${BASE_URL}/db-maintenance.sh")
+}
+
 show_status() {
   echo "============================================================"
   echo "                 LunaServers – Status"
@@ -66,7 +84,9 @@ show_status() {
     /root/.server_optimizer_last_run \
     /root/.server_optimizer_rollback_last_run \
     /root/.ssl_auto_issue_last_run \
-    /root/.mail_ssl_setup_last_run
+    /root/.mail_ssl_setup_last_run \
+    /root/.wp_auto_update_last_run \
+    /root/.db_maintenance_last_run
   do
     if [[ -f "$f" ]]; then
       echo "  [OK]  Marker present: $f"
@@ -80,7 +100,10 @@ show_status() {
   for cron_file in \
     /etc/cron.d/daily-borg-backup \
     /etc/cron.d/auto-security-updates \
-    /etc/cron.d/weekly-malware-scan
+    /etc/cron.d/weekly-malware-scan \
+    /etc/cron.d/daily-ssl-renew \
+    /etc/cron.d/weekly-wp-updates \
+    /etc/cron.d/weekly-db-maintenance
   do
     if [[ -f "$cron_file" ]]; then
       echo "  [OK]  Present: $cron_file"
@@ -176,22 +199,46 @@ while :; do
      - Run AFTER option 7 (ssl-auto-issue) so certs are already issued
      - Re-run any time you add new domains to pick up new certs
 
-  9) Exit Toolkit
+  9) Mail Deliverability Health Check
+     - Checks SPF, DKIM, DMARC DNS records for every CyberPanel domain
+     - Checks IP against 5 major DNSBL / spam blacklists (Spamhaus, etc.)
+     - Checks PTR / reverse DNS matches hostname
+     - Reports SSL cert expiry for each mail.<domain>
+     - No external APIs — pure dig queries
+
+  10) WordPress Auto-Updater
+     - Updates WordPress core, plugins, and themes on all sites under /home
+     - Creates a compressed MySQL dump before each site is updated
+     - Verifies HTTP 200 after updating; flags failures with restore command
+     - Installs a weekly cron (Monday 03:00) on first run
+     - WP-CLI is auto-installed if not present
+
+  11) Database Maintenance
+     - Runs mysqlcheck --optimize --auto-repair on all user databases
+     - Reports database sizes and top 15 largest tables
+     - Identifies orphaned databases with no matching CyberPanel site
+     - Reports slow query log status
+     - Installs a weekly cron (Sunday 04:00) on first run
+
+  12) Exit Toolkit
 ============================================================
 MENU
 
-  read -r -p "Select an option [1-9]: " choice
+  read -r -p "Select an option [1-12]: " choice
 
   case "$choice" in
-    1) run_full_secure_setup ;;
-    2) run_backup_setup_only ;;
-    3) run_restore_module_only ;;
-    4) run_optimizer_only ;;
-    5) run_optimizer_rollback ;;
-    6) show_status ;;
-    7) run_ssl_auto_issue ;;
-    8) run_mail_ssl_fix ;;
-    9) exit 0 ;;
-    *) echo "Invalid choice. Please enter 1–9." ;;
+    1)  run_full_secure_setup ;;
+    2)  run_backup_setup_only ;;
+    3)  run_restore_module_only ;;
+    4)  run_optimizer_only ;;
+    5)  run_optimizer_rollback ;;
+    6)  show_status ;;
+    7)  run_ssl_auto_issue ;;
+    8)  run_mail_ssl_fix ;;
+    9)  run_mail_health_check ;;
+    10) run_wp_auto_update ;;
+    11) run_db_maintenance ;;
+    12) exit 0 ;;
+    *) echo "Invalid choice. Please enter 1–12." ;;
   esac
 done
