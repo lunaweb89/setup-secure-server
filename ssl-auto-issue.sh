@@ -209,11 +209,11 @@ issue_ssl_hostname() {
   "$ACME" --set-default-ca --server letsencrypt 2>/dev/null || true
 
   # Method 1: webroot (preferred — no service interruption)
-  # OLS serves the default host at /usr/local/lsws/DEFAULT/html/
-  # NOTE: only works if the domain has an OLS vhost. Mail-only hostnames
-  # (e.g. mail.<domain>) have no vhost and must use standalone below.
+  # Skip for mail.*/smtp.* — these subdomains have no OLS vhost by design;
+  # OLS returns 404 for HTTP-01 challenges regardless of webroot path.
+  # Go straight to standalone for them (Method 2 below).
   local WEBROOT="/usr/local/lsws/DEFAULT/html"
-  if [[ -d "$WEBROOT" ]]; then
+  if [[ -d "$WEBROOT" && "$domain" != mail.* && "$domain" != smtp.* ]]; then
     log "Issuing cert via acme.sh webroot (no service interruption)..."
     mkdir -p "${WEBROOT}/.well-known/acme-challenge"
     if "$ACME" --issue --server letsencrypt "${force_args[@]}" --webroot "$WEBROOT" -d "$domain" 2>&1; then
