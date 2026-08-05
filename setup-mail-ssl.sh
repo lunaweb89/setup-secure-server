@@ -213,10 +213,12 @@ for domain_path in /etc/letsencrypt/live/*/; do
     continue
   fi
 
-  # Skip staging/test certs — Postfix cannot build a valid TLS context from an
-  # untrusted chain; it sends internal_error to the connecting client instead.
-  if openssl x509 -noout -issuer -in "$cert" 2>/dev/null | grep -qi "staging\|fake\|test\|invalid"; then
-    warn "  STAGING cert detected for $domain — skipping (re-issue via CyberPanel SSL or acme.sh --server letsencrypt)"
+  # Skip untrusted certs (staging, self-signed, or any cert whose chain is not in
+  # the system CA store) — Postfix cannot serve an untrusted chain via SNI and
+  # sends tlsv1 alert internal_error to the connecting SMTP client.
+  if ! openssl verify -untrusted "$cert" "$cert" 2>/dev/null | grep -q ": OK"; then
+    warn "  Cert for $domain not trusted by system CA (staging or self-signed) — skipping"
+    warn "  Re-issue: acme.sh --issue --force --server letsencrypt --standalone -d $domain"
     continue
   fi
 

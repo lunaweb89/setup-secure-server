@@ -365,8 +365,8 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
     key="${domain_path}privkey.pem"
     [[ -f "$cert" && -f "$key" ]] || continue
     openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null || continue
-    # Skip staging/test certs
-    openssl x509 -noout -issuer -in "$cert" 2>/dev/null | grep -qi "staging\|fake\|test\|invalid" && continue
+    # Skip untrusted certs (staging, self-signed) — Postfix cannot serve them via SNI
+    openssl verify -untrusted "$cert" "$cert" 2>/dev/null | grep -q ": OK" || continue
     combined="${POSTFIX_SNI_DIR}/${domain}.pem"
     cat "$key" "$cert" > "$combined"
     chmod 640 "$combined"
