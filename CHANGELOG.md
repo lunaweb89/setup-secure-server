@@ -5,6 +5,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.3.4] – 2026-08-05
+
+### Fixed / Added
+
+**`ssl-auto-issue.sh`**
+
+- **Automatic `mail.<domain>` cert issuance** — added a second daily pass that issues a dedicated Let's Encrypt cert for `mail.<domain>` for every bare domain registered in CyberPanel. Previously only the bare domain itself got a cert; the `mail.` subdomain relied on a fallback that served the bare domain cert, which fails strict hostname verification in SMTP clients because `mail.example.com` is not a SAN on the `example.com` cert. The second pass calls `issue_ssl_hostname("mail.<domain>")` (standalone mode, because `mail.*` has no OLS vhost) so the correct cert exists the morning after a new site is created in CyberPanel.
+
+- **Trust check in `issue_ssl_hostname()`** — the "cert already valid — skipping" check now verifies CA trust via `openssl verify` in addition to expiry. Previously a non-expired self-signed or staging cert (e.g. `issuer=O=Dis, CN=mail.snsinsta.kr`) would be treated as valid and never replaced. Now, untrusted certs trigger a forced production re-issue (`--force --server letsencrypt`) automatically on the next daily cron run.
+
+- **Root cause summary** — `tlsv1 alert internal error` on `mail.<domain>:587` had four stacked causes that applied to every domain on the server, not just one:
+  1. `postmap` without `-F` → stored file paths, not cert content → all SNI lookups broken
+  2. acme.sh default CA set to staging → all acme.sh-issued certs were staging certs
+  3. Staging/self-signed certs in the SNI map → Postfix cannot build TLS context → `internal_error`
+  4. No `mail.<domain>` entry in SNI map → bare domain cert served → hostname verification failed
+
+  All four are now fixed and prevented from recurring by default.
+
+---
+
 ## [1.3.3] – 2026-08-04
 
 ### Fixed (systemic bugs — would repeat on every future domain)

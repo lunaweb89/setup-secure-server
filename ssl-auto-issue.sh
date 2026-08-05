@@ -168,14 +168,23 @@ issue_ssl_for() {
 issue_ssl_hostname() {
   local domain="$1"
   local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+  local force_args=()
 
-  # Skip if cert already exists and is not expiring within 30 days
+  # Skip if cert already exists, is not expiring within 30 days, AND is CA-trusted.
+  # If it exists but is untrusted (staging or self-signed), force a production re-issue.
   if [[ -f "$cert_file" ]]; then
-    if openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
-      log "Cert for $domain already valid and not expiring soon — skipping."
+    local _trusted=false
+    openssl verify -untrusted "$cert_file" "$cert_file" 2>/dev/null | grep -q ": OK" && _trusted=true
+    if $_trusted && openssl x509 -checkend 2592000 -noout -in "$cert_file" 2>/dev/null; then
+      log "Cert for $domain already valid, trusted, not expiring soon — skipping."
       return 0
     fi
-    log "Cert for $domain exists but expiring soon — renewing..."
+    if ! $_trusted; then
+      log "Cert for $domain is untrusted (staging or self-signed) — forcing production re-issue..."
+      force_args=("--force")
+    else
+      log "Cert for $domain exists but expiring soon — renewing..."
+    fi
   fi
 
   # Find acme.sh (CyberPanel installs it for root)
@@ -207,7 +216,7 @@ issue_ssl_hostname() {
   if [[ -d "$WEBROOT" ]]; then
     log "Issuing cert via acme.sh webroot (no service interruption)..."
     mkdir -p "${WEBROOT}/.well-known/acme-challenge"
-    if "$ACME" --issue --server letsencrypt --webroot "$WEBROOT" -d "$domain" 2>&1; then
+    if "$ACME" --issue --server letsencrypt "${force_args[@]}" --webroot "$WEBROOT" -d "$domain" 2>&1; then
       "$ACME" --installcert -d "$domain" \
         --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
         --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
@@ -225,7 +234,7 @@ issue_ssl_hostname() {
   fi
 
   local result=1
-  if "$ACME" --issue --server letsencrypt --standalone -d "$domain" 2>&1; then
+  if "$ACME" --issue --server letsencrypt "${force_args[@]}" --standalone -d "$domain" 2>&1; then
     "$ACME" --installcert -d "$domain" \
       --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
       --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
@@ -285,6 +294,48 @@ for domain in "${ALL_DOMAINS[@]}"; do
     warn "Check CyberPanel logs or issue manually via:"
     warn "  https://<server-ip>:8090 → SSL → Manage SSL → $domain"
     FAILED+=("$domain")
+  fi
+  echo
+done
+
+# -------------------------------------------------------------
+# Issue mail.<domain> certs for every CyberPanel site
+#
+# WordPress SMTP connects to mail.<domain>:587. A cert whose SANs
+# cover only the bare domain fails client hostname verification.
+# mail.* subdomains have no OLS vhost so standalone is used via
+# issue_ssl_hostname() — same logic as the server hostname cert.
+# Runs daily via cron so newly added CyberPanel sites get their
+# mail cert the morning after they are created.
+# -------------------------------------------------------------
+
+echo
+log "Checking mail.<domain> certs for CyberPanel sites..."
+
+for domain in "${SITE_DOMAINS[@]}"; do
+  [[ -z "${domain:-}" ]] && continue
+  # Only bare domains (one dot: example.com — skip mail.example.com, sub.example.com)
+  dots="${domain//[^.]/}"
+  [[ "${#dots}" -ne 1 ]] && continue
+
+  mail_domain="mail.${domain}"
+  echo "------------------------------------------------------------"
+  log "mail cert: $mail_domain"
+
+  if ! resolves_here "$mail_domain"; then
+    resolved="$(get_resolved_ip "$mail_domain")"
+    warn "DNS: $mail_domain → $resolved (not $SERVER_IP) — skipping"
+    SKIPPED_DNS+=("$mail_domain (resolves to: $resolved)")
+    echo
+    continue
+  fi
+
+  log "$mail_domain → $SERVER_IP ✓"
+  if issue_ssl_hostname "$mail_domain"; then
+    SUCCESS+=("$mail_domain")
+  else
+    warn "SSL failed for $mail_domain — check port 80 access or DNS"
+    FAILED+=("$mail_domain")
   fi
   echo
 done
