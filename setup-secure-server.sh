@@ -360,6 +360,10 @@ backup "$FAIL_JAIL"
 
 log "Configuring Fail2Ban (SSH + WordPress + CyberPanel + recidive)..."
 
+# Pre-create CyberPanel log file — Fail2Ban refuses to start if a jail's logpath doesn't exist
+mkdir -p /usr/local/CyberCP/logs
+touch /usr/local/CyberCP/logs/main.log
+
 # WordPress brute force filter — matches POST to wp-login.php in OLS access logs
 cat > /etc/fail2ban/filter.d/wordpress-bruteforce.conf <<'FILTEOF'
 [Definition]
