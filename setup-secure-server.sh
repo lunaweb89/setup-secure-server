@@ -565,22 +565,24 @@ log "Checking ClamAV installation..."
 
 if command -v clamscan >/dev/null 2>&1 && dpkg -s clamav-daemon >/dev/null 2>&1; then
   log "ClamAV already installed; skipping package installation."
-  systemctl enable clamav-freshclam >/dev/null 2>&1 || true
-  systemctl restart clamav-freshclam >/dev/null 2>&1 || true
-  systemctl restart clamav-daemon >/dev/null 2>&1 || true
-  STEP_clamav_install="OK"
 else
   log "Installing ClamAV..."
-  if apt_install_retry clamav clamav-daemon; then
-    systemctl stop clamav-freshclam >/dev/null 2>&1 || true
-    freshclam || log "WARNING: freshclam failed."
-    systemctl enable clamav-freshclam >/dev/null 2>&1 || true
-    systemctl restart clamav-freshclam >/dev/null 2>&1 || true
-    systemctl restart clamav-daemon >/dev/null 2>&1 || true
-    STEP_clamav_install="OK"
-  else
+  if ! apt_install_retry clamav clamav-daemon; then
     log "ERROR: Failed to install ClamAV packages."
   fi
+fi
+
+if command -v clamscan >/dev/null 2>&1; then
+  # Run freshclam once to ensure signatures are current before disabling the daemon
+  systemctl stop clamav-freshclam >/dev/null 2>&1 || true
+  freshclam 2>&1 || log "WARNING: freshclam initial update failed (non-fatal)."
+  # Keep the signature updater running; disable the memory-hungry daemon.
+  # On-demand scanning via clamscan (used by Maldet) does not need the daemon.
+  systemctl enable  clamav-freshclam >/dev/null 2>&1 || true
+  systemctl restart clamav-freshclam >/dev/null 2>&1 || true
+  systemctl stop    clamav-daemon    >/dev/null 2>&1 || true
+  systemctl disable clamav-daemon    >/dev/null 2>&1 || true
+  STEP_clamav_install="OK"
 fi
 
 # ----------------- Maldet ----------------- #
@@ -616,7 +618,7 @@ fi
 # Configure Maldet if config exists (whether newly installed or already present)
 if [[ -f "$MALDET_CONF" ]]; then
   sed -i 's/^scan_clamscan=.*/scan_clamscan="1"/' "$MALDET_CONF"
-  sed -i 's/^scan_clamd=.*/scan_clamd="1"/' "$MALDET_CONF"
+  sed -i 's/^scan_clamd=.*/scan_clamd="0"/' "$MALDET_CONF"
   STEP_maldet_install="OK"
 else
   log "WARNING: Maldet config file not found at $MALDET_CONF"
