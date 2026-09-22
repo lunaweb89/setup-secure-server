@@ -231,16 +231,12 @@ log "Optimizing MariaDB..."
 MARIADB_CONF="/etc/mysql/mariadb.conf.d/99-optimized.cnf"
 cp "$MARIADB_CONF" "$MARIADB_CONF.bak-$timestamp" 2>/dev/null || true
 
-# innodb_redo_log_capacity replaces innodb_log_file_size in MariaDB 10.9+
+# innodb_redo_log_capacity is MySQL 8.0+ only — MariaDB always uses innodb_log_file_size
 # query_cache_type/size were removed in MariaDB 10.10+
 MARIADB_VER_RAW=$(mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "0.0")
 MARIADB_MAJOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f1)
 MARIADB_MINOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f2)
-if (( MARIADB_MAJOR > 10 )) || (( MARIADB_MAJOR == 10 && MARIADB_MINOR >= 9 )); then
-  INNODB_LOG_SETTING="innodb_redo_log_capacity    = 536870912"
-else
-  INNODB_LOG_SETTING="innodb_log_file_size         = 256M"
-fi
+INNODB_LOG_SETTING="innodb_log_file_size         = 256M"
 log "MariaDB version ${MARIADB_VER_RAW} detected — using: ${INNODB_LOG_SETTING%%=*}"
 
 # query_cache was removed in MariaDB 10.10; only set it on older versions
