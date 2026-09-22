@@ -232,6 +232,7 @@ MARIADB_CONF="/etc/mysql/mariadb.conf.d/99-optimized.cnf"
 cp "$MARIADB_CONF" "$MARIADB_CONF.bak-$timestamp" 2>/dev/null || true
 
 # innodb_redo_log_capacity replaces innodb_log_file_size in MariaDB 10.9+
+# query_cache_type/size were removed in MariaDB 10.10+
 MARIADB_VER_RAW=$(mysqld --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "0.0")
 MARIADB_MAJOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f1)
 MARIADB_MINOR=$(echo "$MARIADB_VER_RAW" | cut -d. -f2)
@@ -242,6 +243,14 @@ else
 fi
 log "MariaDB version ${MARIADB_VER_RAW} detected — using: ${INNODB_LOG_SETTING%%=*}"
 
+# query_cache was removed in MariaDB 10.10; only set it on older versions
+QUERY_CACHE_SETTINGS=""
+if (( MARIADB_MAJOR < 10 )) || (( MARIADB_MAJOR == 10 && MARIADB_MINOR < 10 )); then
+  QUERY_CACHE_SETTINGS="query_cache_type        = 0
+query_cache_size        = 0
+"
+fi
+
 cat > "$MARIADB_CONF" <<EOF
 [mysqld]
 max_connections         = 300
@@ -250,10 +259,7 @@ wait_timeout            = 60
 interactive_timeout     = 180
 thread_cache_size       = 50
 
-query_cache_type        = 0
-query_cache_size        = 0
-
-innodb_buffer_pool_size = ${MARIADB_MB}M
+${QUERY_CACHE_SETTINGS}innodb_buffer_pool_size = ${MARIADB_MB}M
 ${INNODB_LOG_SETTING}
 innodb_flush_method     = O_DIRECT
 innodb_flush_log_at_trx_commit = 2
