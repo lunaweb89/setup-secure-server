@@ -243,13 +243,16 @@ issue_ssl_hostname() {
   fi
 
   local result=1
-  if "$ACME" --issue --server letsencrypt "${force_args[@]}" --standalone -d "$domain" 2>&1; then
+  if timeout 120 "$ACME" --issue --server letsencrypt "${force_args[@]}" --standalone -d "$domain" 2>&1; then
     "$ACME" --installcert -d "$domain" \
       --fullchain-file "/etc/letsencrypt/live/${domain}/fullchain.pem" \
       --key-file       "/etc/letsencrypt/live/${domain}/privkey.pem" 2>&1 || true
     [[ -f "$cert_file" ]] && result=0
+  else
+    warn "  Standalone SSL failed or timed out for $domain (120s limit) — OLS will restart now."
   fi
 
+  # Always restart OLS — even if acme.sh timed out — so the server stays up.
   $ols_was_running && systemctl start lsws
   return $result
 }
