@@ -129,6 +129,18 @@ issue_ssl_for() {
   local domain="$1"
   local output
 
+  # Skip if cert already exists, is CA-trusted, and not expiring within 30 days.
+  # Avoids unnecessary CyberPanel calls (and Let's Encrypt rate limits) for healthy certs.
+  local cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+  if [[ -f "$cert_file" ]]; then
+    local _trusted=false
+    openssl verify -untrusted "$cert_file" "$cert_file" 2>/dev/null | grep -q ": OK" && _trusted=true
+    if $_trusted && openssl x509 -checkend 2592000 -noout -in "$cert_file" >/dev/null 2>&1; then
+      log "Cert for $domain already valid, trusted, not expiring soon — skipping."
+      return 0
+    fi
+  fi
+
   # Method 1: CyberPanel CLI (preferred, CyberPanel 2.x+)
   # CyberPanel prints JSON: {"success": 1} on success, {"success": 0} on failure.
   # Exit code alone is unreliable — must check the JSON "success" field.
@@ -427,7 +439,7 @@ if [[ -f /root/.mail_ssl_setup_last_run && -f /etc/postfix/sni_map ]]; then
     cert="${domain_path}fullchain.pem"
     key="${domain_path}privkey.pem"
     [[ -f "$cert" && -f "$key" ]] || continue
-    openssl x509 -checkend 0 -noout -in "$cert" 2>/dev/null || continue
+    openssl x509 -checkend 0 -noout -in "$cert" >/dev/null 2>&1 || continue
     # Skip untrusted certs (staging, self-signed) — Postfix cannot serve them via SNI
     openssl verify -untrusted "$cert" "$cert" 2>/dev/null | grep -q ": OK" || continue
     combined="${POSTFIX_SNI_DIR}/${domain}.pem"
